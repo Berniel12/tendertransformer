@@ -138,7 +138,7 @@ async function runContinuousProcessingWrapper() {
     try {
         // Use the enhanced continuous processing from the processing service
         const options = {
-            tendersPerSource: parseInt(process.env.TENDERS_PER_SOURCE || '500', 10),
+            tendersPerSource: parseInt(process.env.TENDERS_PER_SOURCE || '1000', 10),
             waitMinutes: parseInt(process.env.PROCESSING_INTERVAL_MINUTES || '5', 10)
         };
         
@@ -205,7 +205,7 @@ function showUsage() {
     console.log('  node src/index.js help                - Show this help message');
     console.log('');
     console.log('Environment Variables:');
-    console.log('  TENDERS_PER_SOURCE           - Number of tenders to process from each source per round (default: 500)');
+    console.log('  TENDERS_PER_SOURCE           - Number of tenders to process from each source per round (default: 1000)');
     console.log('  PROCESSING_INTERVAL_MINUTES  - Minutes to wait between processing rounds (default: 5)');
 }
 
