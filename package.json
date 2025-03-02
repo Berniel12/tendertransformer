@@ -1,0 +1,26 @@
+{
+    "name": "tender-processing-system",
+    "version": "1.0.0",
+    "description": "A system for processing and normalizing tender data from various sources",
+    "main": "src/index.js",
+    "scripts": {
+        "start": "node src/index.js",
+        "process": "node src/index.js process",
+        "process-all": "node src/index.js process-all",
+        "test": "jest"
+    },
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@supabase/supabase-js": "^2.0.0",
+        "apify": "^3.3.2",
+        "dotenv": "^16.4.7",
+        "node-fetch": "^2.6.9"
+    },
+    "devDependencies": {
+        "jest": "^29.0.0"
+    },
+    "engines": {
+        "node": ">=14.0.0"
+    }
+}

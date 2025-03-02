@@ -1,0 +1,45 @@
+{
+    "name": "tender-processing-system",
+    "version": "1.0.0",
+    "buildTag": "latest",
+    "env": {
+        "SUPABASE_URL": "",
+        "SUPABASE_KEY": "",
+        "OPENROUTER_API_KEY": ""
+    },
+    "environmentVariables": {
+        "SUPABASE_URL": {
+            "name": "SUPABASE_URL",
+            "value": "",
+            "isSecret": false,
+            "description": "URL of your Supabase instance"
+        },
+        "SUPABASE_KEY": {
+            "name": "SUPABASE_KEY",
+            "value": "",
+            "isSecret": true,
+            "description": "Service key for your Supabase instance"
+        },
+        "OPENROUTER_API_KEY": {
+            "name": "OPENROUTER_API_KEY",
+            "value": "",
+            "isSecret": true,
+            "description": "API key for OpenRouter LLM service"
+        }
+    },
+    "input": {
+        "title": "Tender Processing System",
+        "description": "Process tenders from various sources and normalize them into a unified format",
+        "type": "object",
+        "schemaVersion": 1,
+        "properties": {
+            "sourceName": {
+                "title": "Source Name",
+                "type": "string",
+                "description": "Name of the source to process (e.g., sam_gov). Leave empty to process all sources.",
+                "editor": "textfield"
+            }
+        },
+        "required": []
+    }
+}
