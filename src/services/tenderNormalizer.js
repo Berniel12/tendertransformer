@@ -18,72 +18,225 @@ const performanceStats = {
 let tenderProcessingCounter = 0;
 
 /**
- * Log normalization statistics and field changes
- * @param {string} phase - Normalization phase name
- * @param {Object} before - State before normalization
- * @param {Object} after - State after normalization
- * @param {string} [note] - Additional note
+ * Global stats to track normalization improvements
  */
-function logNormalizationStats(phase, before, after, note = '') {
-    // Only log approximately 1 in 10 tenders to avoid excessive logging
-    tenderProcessingCounter++;
-    if (tenderProcessingCounter % 10 !== 0) return;
-    
-    console.log(`\n========== NORMALIZATION STATISTICS [${phase}] ==========`);
-    if (note) console.log(`NOTE: ${note}`);
-    
-    // Track changed fields
-    const changedFields = [];
-    const emptyFields = [];
-    const filledFields = [];
-    
-    // Compare before and after for all fields
-    Object.keys(after).forEach(key => {
-        // Skip metadata fields
-        if (['normalized_at', 'normalized_by', 'normalized_method', 'processing_time_ms'].includes(key)) {
-            return;
-        }
+const normalizationStats = {
+    total: 0,
+    fieldsProcessed: 0,
+    fieldsFilledBefore: 0,
+    fieldsFilledAfter: 0,
+    titleChanges: 0,
+    sectorAdded: 0,
+    descriptionImproved: 0,
+    contactInfoAdded: 0,
+    valueAdded: 0,
+    sources: {},
+    startTime: Date.now()
+};
+
+/**
+ * File-based logging function to avoid console logging limitations
+ * @param {Object} logData - Log data to write to file
+ */
+function writeDetailedLog(phase, before, after, note) {
+    try {
+        // Only log a smaller sample (1 in 50) to avoid excessive logging
+        if (tenderProcessingCounter % 50 !== 0) return;
         
-        const beforeValue = before[key];
-        const afterValue = after[key];
+        // Prepare the log entry as an object for structured logging
+        const logEntry = {
+            timestamp: new Date().toISOString(),
+            phase,
+            note,
+            tenderId: after.source_id || after.id || 'unknown',
+            source: after.source_table || 'unknown',
+            changes: [],
+            stats: {
+                totalFields: Object.keys(after).length,
+                filledBefore: 0,
+                filledAfter: 0,
+                emptyBefore: 0,
+                emptyAfter: 0
+            },
+            emptyFields: []
+        };
         
-        // Track fields that changed during normalization
-        if (beforeValue !== afterValue && afterValue !== null && afterValue !== undefined) {
-            changedFields.push({
-                field: key,
-                before: beforeValue || '(empty)',
-                after: afterValue
+        // Track changed fields
+        Object.keys(after).forEach(key => {
+            // Skip metadata fields
+            if (['normalized_at', 'normalized_by', 'normalized_method', 'processing_time_ms'].includes(key)) {
+                return;
+            }
+            
+            const beforeValue = before[key];
+            const afterValue = after[key];
+            
+            // Count filled/empty fields before
+            if (beforeValue === null || beforeValue === undefined || beforeValue === '') {
+                logEntry.stats.emptyBefore++;
+            } else {
+                logEntry.stats.filledBefore++;
+            }
+            
+            // Count filled/empty fields after
+            if (afterValue === null || afterValue === undefined || afterValue === '') {
+                logEntry.stats.emptyAfter++;
+                logEntry.emptyFields.push(key);
+            } else {
+                logEntry.stats.filledAfter++;
+            }
+            
+            // Track fields that changed during normalization
+            if (beforeValue !== afterValue && afterValue !== null && afterValue !== undefined) {
+                logEntry.changes.push({
+                    field: key,
+                    before: beforeValue || '(empty)',
+                    after: afterValue
+                });
+            }
+        });
+        
+        // Calculate improvement percentage
+        logEntry.stats.improvementPercentage = 
+            ((logEntry.stats.filledAfter - logEntry.stats.filledBefore) / 
+             logEntry.stats.totalFields * 100).toFixed(2);
+        
+        // Log to console in a more compact format
+        console.log(`\n--- NORMALIZATION [${phase}] - ${after.source_table}:${after.source_id || 'unknown'} ---`);
+        console.log(`Fields filled: ${logEntry.stats.filledBefore} → ${logEntry.stats.filledAfter} (${logEntry.stats.improvementPercentage}% improvement)`);
+        
+        if (logEntry.changes.length > 0) {
+            console.log(`Changed ${logEntry.changes.length} fields, including:`);
+            // Show just a few important changes
+            const keyFields = ['title', 'description', 'sector', 'tender_type', 'estimated_value'];
+            const importantChanges = logEntry.changes.filter(change => keyFields.includes(change.field));
+            
+            importantChanges.forEach(change => {
+                let beforeDisplay = typeof change.before === 'string' ? 
+                    change.before.substring(0, 50) : 
+                    String(change.before);
+                
+                let afterDisplay = typeof change.after === 'string' ? 
+                    change.after.substring(0, 50) : 
+                    String(change.after);
+                
+                if (typeof change.before === 'string' && change.before.length > 50) beforeDisplay += '...';
+                if (typeof change.after === 'string' && change.after.length > 50) afterDisplay += '...';
+                
+                console.log(`  ${change.field}: "${beforeDisplay}" → "${afterDisplay}"`);
             });
         }
         
-        // Track empty vs. filled fields
-        if (afterValue === null || afterValue === undefined || afterValue === '') {
-            emptyFields.push(key);
-        } else {
-            filledFields.push(key);
-        }
+        // In a production environment, you would write this to a file
+        // For now, we'll just update global stats
+        updateNormalizationStats(before, after);
+        
+    } catch (error) {
+        console.error('Error in detailed logging:', error);
+    }
+}
+
+/**
+ * Update global statistics for batch reporting
+ */
+function updateNormalizationStats(before, after) {
+    normalizationStats.total++;
+    
+    // Count fields
+    const totalFields = Object.keys(after).filter(k => 
+        !['normalized_at', 'normalized_by', 'normalized_method', 'processing_time_ms'].includes(k)
+    ).length;
+    
+    normalizationStats.fieldsProcessed += totalFields;
+    
+    // Count filled fields before/after
+    const filledBefore = Object.values(before).filter(v => 
+        v !== null && v !== undefined && v !== ''
+    ).length;
+    
+    const filledAfter = Object.values(after).filter(v => 
+        v !== null && v !== undefined && v !== ''
+    ).length;
+    
+    normalizationStats.fieldsFilledBefore += filledBefore;
+    normalizationStats.fieldsFilledAfter += filledAfter;
+    
+    // Track source-specific stats
+    const source = after.source_table || 'unknown';
+    if (!normalizationStats.sources[source]) {
+        normalizationStats.sources[source] = {
+            total: 0,
+            fieldsFilledBefore: 0,
+            fieldsFilledAfter: 0
+        };
+    }
+    
+    normalizationStats.sources[source].total++;
+    normalizationStats.sources[source].fieldsFilledBefore += filledBefore;
+    normalizationStats.sources[source].fieldsFilledAfter += filledAfter;
+    
+    // Track specific improvements
+    if (before.title !== after.title && after.title) normalizationStats.titleChanges++;
+    if (!before.sector && after.sector) normalizationStats.sectorAdded++;
+    if ((!before.description || before.description !== after.description) && after.description) {
+        normalizationStats.descriptionImproved++;
+    }
+    if ((!before.contact_email && after.contact_email) || 
+        (!before.contact_name && after.contact_name) || 
+        (!before.contact_phone && after.contact_phone)) {
+        normalizationStats.contactInfoAdded++;
+    }
+    if (!before.estimated_value && after.estimated_value) normalizationStats.valueAdded++;
+    
+    // Print summary statistics every 100 tenders
+    if (normalizationStats.total % 100 === 0) {
+        printSummaryStatistics();
+    }
+}
+
+/**
+ * Print summary statistics about normalization effectiveness
+ */
+function printSummaryStatistics() {
+    const elapsedSeconds = (Date.now() - normalizationStats.startTime) / 1000;
+    const averageTimePerTender = elapsedSeconds / normalizationStats.total;
+    
+    console.log('\n========== NORMALIZATION SUMMARY STATISTICS ==========');
+    console.log(`Processed ${normalizationStats.total} tenders in ${elapsedSeconds.toFixed(2)}s (${averageTimePerTender.toFixed(3)}s/tender)`);
+    
+    const beforePercentage = (normalizationStats.fieldsFilledBefore / normalizationStats.fieldsProcessed * 100).toFixed(2);
+    const afterPercentage = (normalizationStats.fieldsFilledAfter / normalizationStats.fieldsProcessed * 100).toFixed(2);
+    const improvementPercentage = (afterPercentage - beforePercentage).toFixed(2);
+    
+    console.log(`\nField completion: ${beforePercentage}% → ${afterPercentage}% (${improvementPercentage}% improvement)`);
+    console.log(`Fields filled: ${normalizationStats.fieldsFilledBefore} → ${normalizationStats.fieldsFilledAfter} (+${normalizationStats.fieldsFilledAfter - normalizationStats.fieldsFilledBefore})`);
+    
+    console.log('\nSpecific improvements:');
+    console.log(`- Title normalization: ${normalizationStats.titleChanges} tenders`);
+    console.log(`- Sector identification: ${normalizationStats.sectorAdded} tenders`);
+    console.log(`- Description enhancement: ${normalizationStats.descriptionImproved} tenders`);
+    console.log(`- Contact info extraction: ${normalizationStats.contactInfoAdded} tenders`);
+    console.log(`- Value extraction: ${normalizationStats.valueAdded} tenders`);
+    
+    console.log('\nPer-source statistics:');
+    Object.entries(normalizationStats.sources).forEach(([source, stats]) => {
+        const sourceBefore = (stats.fieldsFilledBefore / (stats.total * 30) * 100).toFixed(2);
+        const sourceAfter = (stats.fieldsFilledAfter / (stats.total * 30) * 100).toFixed(2);
+        console.log(`- ${source}: ${sourceBefore}% → ${sourceAfter}% (${(sourceAfter - sourceBefore).toFixed(2)}% improvement)`);
     });
     
-    // Log field changes
-    if (changedFields.length > 0) {
-        console.log("\nFIELDS CHANGED DURING NORMALIZATION:");
-        changedFields.forEach(change => {
-            console.log(`${change.field}:\n  BEFORE: ${change.before}\n  AFTER:  ${change.after}`);
-        });
-    }
+    console.log('=======================================================\n');
+}
+
+/**
+ * Log normalization statistics and field changes - replaced with better system
+ */
+function logNormalizationStats(phase, before, after, note = '') {
+    // Use the new detailed logging function instead
+    writeDetailedLog(phase, before, after, note);
     
-    // Log filled vs empty fields
-    console.log(`\nFIELD COMPLETION STATISTICS:`);
-    console.log(`Total fields: ${filledFields.length + emptyFields.length}`);
-    console.log(`Filled fields: ${filledFields.length} (${((filledFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
-    console.log(`Empty fields: ${emptyFields.length} (${((emptyFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
-    
-    if (emptyFields.length > 0) {
-        console.log("\nEMPTY FIELDS AFTER NORMALIZATION:");
-        console.log(emptyFields.join(', '));
-    }
-    
-    console.log("========================================================\n");
+    // Also update tender processing counter
+    tenderProcessingCounter++;
 }
 
 /**
@@ -575,7 +728,7 @@ function enhanceTenderTitles(normalizedData) {
         normalizedData.title_english = title;
     }
     
-    // Log changes for a sample of tenders
+    // Log changes for a sample of tenders using the improved logging
     logNormalizationStats('Title Enhancement', originalData, normalizedData, 
         `Title was ${originalData.title ? 'transformed' : 'missing'}`);
     
@@ -998,7 +1151,7 @@ function fillMissingFields(normalizedData) {
         }
     }
     
-    // At the end of the function, log the changes
+    // At the end of the function, log the changes with improved logging
     logNormalizationStats('Field Filling', originalData, normalizedData, 
         fieldsFilledByFunction.length > 0 ? 
         `Filled ${fieldsFilledByFunction.length} fields: ${fieldsFilledByFunction.join(', ')}` :
@@ -1733,29 +1886,15 @@ async function normalizeTender(tender, sourceTable) {
     // Save original state for logging
     const originalTender = JSON.parse(JSON.stringify(tender));
     
-    // Log initial state for sample tenders
+    // Only log initial state for 1 in 50 tenders to reduce console spam
     tenderProcessingCounter++;
-    if (tenderProcessingCounter % 10 === 0) {
-        console.log(`\n========== PROCESSING TENDER #${tenderProcessingCounter} ==========`);
-        console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
+    if (tenderProcessingCounter % 50 === 0) {
+        // Use simplified logging to prevent overwhelming the console
+        const filledFields = Object.values(tender).filter(v => v !== null && v !== undefined && v !== '').length;
+        const totalFields = Object.keys(tender).length;
         
-        // Log initial field completion statistics
-        const filledFields = [];
-        const emptyFields = [];
-        
-        Object.entries(tender).forEach(([key, value]) => {
-            if (value === null || value === undefined || value === '') {
-                emptyFields.push(key);
-            } else {
-                filledFields.push(key);
-            }
-        });
-        
-        console.log(`\nINITIAL FIELD STATISTICS:`);
-        console.log(`Total fields: ${filledFields.length + emptyFields.length}`);
-        console.log(`Filled fields: ${filledFields.length} (${((filledFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
-        console.log(`Empty fields: ${emptyFields.length} (${((emptyFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
-        console.log(`==================================================\n`);
+        console.log(`\n--- PROCESSING TENDER #${tenderProcessingCounter} - ${sourceTable}:${tender.id || 'unknown'} ---`);
+        console.log(`Initial completeness: ${filledFields}/${totalFields} fields (${(filledFields/totalFields*100).toFixed(2)}%)`);
     }
     
     try {
@@ -1775,35 +1914,40 @@ async function normalizeTender(tender, sourceTable) {
             normalizedData.source_table = sourceTable;
             normalizedData.processing_time_ms = endTime - startTime;
             
-            // Log final results for this fast path too
-            if (tenderProcessingCounter % 10 === 0) {
-                console.log(`\n========== FINAL NORMALIZATION RESULTS (FAST PATH) ==========`);
-                console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
-                console.log(`Normalization method: ${normalizedData.normalized_method}`);
-                console.log(`Processing time: ${(endTime - startTime) / 1000} seconds`);
+            // For final results logging, also reduce frequency and simplify
+            if (tenderProcessingCounter % 50 === 0) {
+                // Get the result from whatever normalization path was used
+                let finalResult;
+                if (typeof fullyEnhancedData !== 'undefined') {
+                    finalResult = fullyEnhancedData;
+                } else if (typeof enhancedData !== 'undefined') {
+                    finalResult = enhancedData;
+                } else if (typeof normalizedData !== 'undefined') {
+                    finalResult = normalizedData;
+                } else {
+                    finalResult = result;
+                }
                 
-                // Compare original vs final state
-                const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
-                const finalFilledCount = Object.values(normalizedData).filter(v => v !== null && v !== undefined && v !== '').length;
+                const originalFilled = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+                const finalFilled = Object.values(finalResult).filter(v => v !== null && v !== undefined && v !== '').length;
+                const totalFields = Object.keys(finalResult).length;
                 
-                console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
-                console.log(`Original filled fields: ${originalFilledCount}`);
-                console.log(`Final filled fields: ${finalFilledCount}`);
-                console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(normalizedData).length * 100).toFixed(2)}%)`);
+                console.log(`\n--- FINAL RESULT - ${finalResult.normalized_method || 'unknown'} - ${(finalResult.processing_time_ms || 0)/1000}s ---`);
+                console.log(`Completeness: ${originalFilled}/${totalFields} → ${finalFilled}/${totalFields} fields`);
+                console.log(`Improvement: +${finalFilled - originalFilled} fields (${((finalFilled-originalFilled)/totalFields*100).toFixed(2)}%)`);
                 
-                // Show dramatic changes in key fields
-                const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
-                console.log(`\nKEY FIELD CHANGES:`);
+                // Show just a few key field changes to avoid log flooding
+                const keyFields = ['title', 'description', 'status', 'sector'];
                 keyFields.forEach(field => {
-                    const originalValue = originalTender[field] || '(empty)';
-                    const finalValue = normalizedData[field] || '(empty)';
+                    const before = originalTender[field];
+                    const after = finalResult[field];
                     
-                    if (originalValue !== finalValue) {
-                        console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
+                    if (before !== after && after) {
+                        const beforeStr = before ? (before.substring(0, 40) + (before.length > 40 ? '...' : '')) : '(empty)';
+                        const afterStr = after.substring(0, 40) + (after.length > 40 ? '...' : '');
+                        console.log(`${field}: "${beforeStr}" → "${afterStr}"`);
                     }
                 });
-                
-                console.log(`==================================================\n`);
             }
             
             return normalizedData;
@@ -1848,7 +1992,7 @@ async function normalizeTender(tender, sourceTable) {
         console.log(`LLM normalization completed in ${(endTime - startTime) / 1000} seconds`);
         
         // Whether we used LLM, fast, or fallback normalization, log final results for sample tenders
-        if (tenderProcessingCounter % 10 === 0) {
+        if (tenderProcessingCounter % 50 === 0) {
             // Get the result, whether it's enhancedData, normalizedData, or result from fallback
             let finalResult;
             if (typeof fullyEnhancedData !== 'undefined') {
@@ -1861,33 +2005,26 @@ async function normalizeTender(tender, sourceTable) {
                 finalResult = result;
             }
             
-            console.log(`\n========== FINAL NORMALIZATION RESULTS ==========`);
-            console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
-            console.log(`Normalization method: ${finalResult.normalized_method || 'unknown'}`);
-            console.log(`Processing time: ${(finalResult.processing_time_ms || 0) / 1000} seconds`);
+            const originalFilled = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+            const finalFilled = Object.values(finalResult).filter(v => v !== null && v !== undefined && v !== '').length;
+            const totalFields = Object.keys(finalResult).length;
             
-            // Compare original vs final state
-            const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
-            const finalFilledCount = Object.values(finalResult).filter(v => v !== null && v !== undefined && v !== '').length;
+            console.log(`\n--- FINAL RESULT - ${finalResult.normalized_method || 'unknown'} - ${(finalResult.processing_time_ms || 0)/1000}s ---`);
+            console.log(`Completeness: ${originalFilled}/${totalFields} → ${finalFilled}/${totalFields} fields`);
+            console.log(`Improvement: +${finalFilled - originalFilled} fields (${((finalFilled-originalFilled)/totalFields*100).toFixed(2)}%)`);
             
-            console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
-            console.log(`Original filled fields: ${originalFilledCount}`);
-            console.log(`Final filled fields: ${finalFilledCount}`);
-            console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(finalResult).length * 100).toFixed(2)}%)`);
-            
-            // Show dramatic changes in key fields
-            const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
-            console.log(`\nKEY FIELD CHANGES:`);
+            // Show just a few key field changes to avoid log flooding
+            const keyFields = ['title', 'description', 'status', 'sector'];
             keyFields.forEach(field => {
-                const originalValue = originalTender[field] || '(empty)';
-                const finalValue = finalResult[field] || '(empty)';
+                const before = originalTender[field];
+                const after = finalResult[field];
                 
-                if (originalValue !== finalValue) {
-                    console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
+                if (before !== after && after) {
+                    const beforeStr = before ? (before.substring(0, 40) + (before.length > 40 ? '...' : '')) : '(empty)';
+                    const afterStr = after.substring(0, 40) + (after.length > 40 ? '...' : '');
+                    console.log(`${field}: "${beforeStr}" → "${afterStr}"`);
                 }
             });
-            
-            console.log(`==================================================\n`);
         }
         
         return fullyEnhancedData;
@@ -1963,7 +2100,7 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
     result.source_id = tender.id;
     
     // Log fallback results for sampling of tenders
-    if (tenderProcessingCounter % 10 === 0) {
+    if (tenderProcessingCounter % 50 === 0) {
         console.log(`\n========== FINAL NORMALIZATION RESULTS (FALLBACK) ==========`);
         console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
         console.log(`Normalization method: ${result.normalized_method}`);
