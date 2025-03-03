@@ -122,12 +122,12 @@ async function processTendersFromAllSources(supabaseAdmin, options = {}) {
  * Process a limited number of tenders from a specific table
  * @param {Object} supabaseAdmin - Supabase admin client
  * @param {string} tableName - Name of the source table
- * @param {number} limit - Maximum number of tenders to process
+ * @param {number} limit - Maximum number of successful normalizations to achieve
  * @param {boolean} forceReprocess - Whether to reprocess tenders that already exist in the database
  * @returns {Promise<Object>} Processing results
  */
 async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, forceReprocess = false) {
-    console.log(`Starting to process up to ${limit} tenders from ${tableName}${forceReprocess ? ' (force reprocessing enabled)' : ''}`);
+    console.log(`Starting to process until ${limit} successful normalizations from ${tableName}${forceReprocess ? ' (force reprocessing enabled)' : ''}`);
     
     // Get the appropriate adapter
     const adapter = sourceRegistry.getAdapter(tableName);
@@ -140,12 +140,13 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     }
     
     // Reset counters for this batch
-    let processedCount = 0;
+    let processedCount = 0; // Successfully normalized tenders
     let skippedCount = 0;
     let errorCount = 0;
     let fallbackCount = 0; // Track number of fallback normalizations
     let fastNormalizationCount = 0; // Track number of fast normalizations
     let updatedCount = 0; // Track number of updated records
+    let attemptCount = 0; // Track total attempts
     
     // Check if table has timestamp fields for incremental processing
     const tableInfo = await supabaseAdmin
@@ -174,21 +175,20 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     }
     
     const totalAvailable = countData[0]?.count || 0;
-    const totalCount = Math.min(totalAvailable, limit * 10); // Allow checking up to 10x the limit to find new tenders
-    console.log(`Found ${totalAvailable} tenders to process in ${tableName}, will process up to ${totalCount}`);
+    console.log(`Found ${totalAvailable} tenders available in ${tableName}`);
     
-    if (totalCount === 0) {
+    if (totalAvailable === 0) {
         console.log(`No tenders to process in ${tableName}`);
         return { success: true, processed: 0, skipped: 0, errors: 0, fallback: 0 };
     }
     
     // Define a chunk size for batch processing
-    const chunkSize = 20; // Increased from 10 to 20
-    const concurrency = 5; // Increased from 2 to 5
+    const chunkSize = 20;
+    const concurrency = 5;
     
     // Process in chunks to avoid overwhelming the system
     const processChunk = async (offset) => {
-        console.log(`Processing chunk from ${offset} to ${Math.min(offset + chunkSize, totalCount)} of ${totalCount}`);
+        console.log(`Processing chunk from ${offset} to ${Math.min(offset + chunkSize, totalAvailable)} of ${totalAvailable}`);
         
         // Get a batch of tenders
         let queryBatch = supabaseAdmin.from(tableName)
@@ -200,7 +200,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             queryBatch = queryBatch.is('last_processed_at', null);
         }
         
-        // Sort by created_at desc to prioritize newer tenders if the field exists
+        // Always sort by created_at desc to prioritize newer tenders
         if (timestampFields.includes('created_at')) {
             queryBatch = queryBatch.order('created_at', { ascending: false });
         }
@@ -221,10 +221,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         const results = await Promise.all(
             tenders.map(async (tender, index) => {
                 // Simple concurrency control - wait before processing based on index
-                await new Promise(resolve => setTimeout(resolve, Math.floor(index / concurrency) * 500)); // Reduced from 1000ms to 500ms
+                await new Promise(resolve => setTimeout(resolve, Math.floor(index / concurrency) * 500));
                 
                 try {
-                    console.log(`Processing tender ${offset + index + 1}/${totalCount} from ${tableName}`);
+                    attemptCount++;
+                    console.log(`Processing tender ${offset + index + 1} from ${tableName} (Attempt ${attemptCount}, Successful: ${processedCount}/${limit})`);
                     
                     // Use the adapter to process the tender
                     const startTime = Date.now();
@@ -236,10 +237,10 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Log normalization method
                     if (normalizedTender.normalized_method === 'rule-based-fallback') {
-                        console.log(`Tender ${offset + index + 1}/${totalCount} from ${tableName} normalized using rule-based fallback`);
+                        console.log(`Tender ${offset + index + 1} from ${tableName} normalized using rule-based fallback`);
                         fallbackCount++;
                     } else if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        console.log(`Tender ${offset + index + 1}/${totalCount} from ${tableName} normalized using fast method`);
+                        console.log(`Tender ${offset + index + 1} from ${tableName} normalized using fast method`);
                         fastNormalizationCount++;
                     }
                     
@@ -284,50 +285,6 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         
                         skippedCount++;
                         return { success: true, skipped: true };
-                    } else if (existingTenders && existingTenders.length > 0 && forceReprocess) {
-                        // Update existing record instead of inserting a new one
-                        console.log(`Tender ${sourceId} from ${tableName} already exists, updating it`);
-                        
-                        // CRITICAL FIX: Set url, tender_type, and other fields to null if they are empty strings
-                        Object.keys(normalizedTender).forEach(key => {
-                            if (normalizedTender[key] === '') {
-                                normalizedTender[key] = null;
-                            }
-                        });
-                        
-                        // CRITICAL FIX: Make sure source_table and source_id are set
-                        normalizedTender.source_table = tableName;
-                        normalizedTender.source_id = sourceId;
-                        
-                        try {
-                            const { error: updateError } = await supabaseAdmin
-                                .from('unified_tenders')
-                                .update(normalizedTender)
-                                .eq('source_table', tableName)
-                                .eq('source_id', sourceId);
-                            
-                            if (updateError) {
-                                console.error(`Error updating unified tender: ${updateError.message}`);
-                                errorCount++;
-                                return { success: false, error: updateError.message };
-                            }
-                            
-                            // Update the last_processed_at timestamp
-                            if (timestampFields.includes('last_processed_at')) {
-                                await supabaseAdmin
-                                    .from(tableName)
-                                    .update({ last_processed_at: new Date().toISOString() })
-                                    .eq('id', tender.id);
-                            }
-                            
-                            updatedCount++;
-                            console.log(`Successfully updated tender ${sourceId} from ${tableName}`);
-                            return { success: true, updated: true };
-                        } catch (updateError) {
-                            console.error(`Exception during tender update: ${updateError.message}`);
-                            errorCount++;
-                            return { success: false, error: updateError.message };
-                        }
                     }
                     
                     // CRITICAL FIX: Set url, tender_type, and other fields to null if they are empty strings
@@ -341,43 +298,49 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     normalizedTender.source_table = tableName;
                     normalizedTender.source_id = sourceId;
                     
-                    // Insert the normalized tender into the database
+                    // Insert or update the normalized tender in the database
                     try {
-                        const { error: insertError } = await supabaseAdmin
-                            .from('unified_tenders')
-                            .insert(normalizedTender);
-                        
-                        if (insertError) {
-                            console.error(`Error inserting unified tender: ${insertError.message}`);
-                            errorCount++;
-                            return { success: false, error: insertError.message };
+                        if (existingTenders && existingTenders.length > 0) {
+                            const { error: updateError } = await supabaseAdmin
+                                .from('unified_tenders')
+                                .update(normalizedTender)
+                                .eq('source_table', tableName)
+                                .eq('source_id', sourceId);
+                            
+                            if (updateError) {
+                                console.error(`Error updating unified tender: ${updateError.message}`);
+                                errorCount++;
+                                return { success: false, error: updateError.message };
+                            }
+                            updatedCount++;
+                        } else {
+                            const { error: insertError } = await supabaseAdmin
+                                .from('unified_tenders')
+                                .insert(normalizedTender);
+                            
+                            if (insertError) {
+                                console.error(`Error inserting unified tender: ${insertError.message}`);
+                                errorCount++;
+                                return { success: false, error: insertError.message };
+                            }
+                            processedCount++;
                         }
-                    } catch (insertError) {
-                        console.error(`Exception during tender insertion: ${insertError.message}`);
                         
-                        // If this is a duplicate key error, just mark as skipped
-                        if (insertError.message && insertError.message.includes('duplicate key')) {
-                            console.log(`Duplicate tender ${sourceId} from ${tableName}, skipping`);
-                            skippedCount++;
-                            return { success: true, skipped: true };
+                        // Update the last_processed_at timestamp
+                        if (timestampFields.includes('last_processed_at')) {
+                            await supabaseAdmin
+                                .from(tableName)
+                                .update({ last_processed_at: new Date().toISOString() })
+                                .eq('id', tender.id);
                         }
                         
+                        console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
+                        return { success: true };
+                    } catch (error) {
+                        console.error(`Error saving tender: ${error.message}`);
                         errorCount++;
-                        return { success: false, error: insertError.message };
+                        return { success: false, error: error.message };
                     }
-                    
-                    // Update the last_processed_at timestamp
-                    if (timestampFields.includes('last_processed_at')) {
-                        await supabaseAdmin
-                            .from(tableName)
-                            .update({ last_processed_at: new Date().toISOString() })
-                            .eq('id', tender.id);
-                    }
-                    
-                    console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
-                    processedCount++;
-                    
-                    return { success: true };
                 } catch (error) {
                     console.error(`Error processing tender from ${tableName}:`, error);
                     errorCount++;
@@ -396,11 +359,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         };
     };
     
-    // Process tenders in chunks until we reach the limit
+    // Process tenders in chunks until we reach the limit of successful normalizations
     let offset = 0;
     let moreToProcess = true;
     
-    while (moreToProcess && offset < totalCount) {
+    while (moreToProcess && processedCount < limit) {
         const chunkResult = await processChunk(offset);
         if (!chunkResult.success) {
             console.error(`Error processing chunk at offset ${offset}:`, chunkResult.error);
@@ -411,7 +374,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                 skipped: skippedCount,
                 errors: errorCount,
                 fallback: fallbackCount,
-                fastNormalization: fastNormalizationCount
+                fastNormalization: fastNormalizationCount,
+                attempts: attemptCount
             };
         }
         
@@ -427,22 +391,22 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             moreToProcess = false;
         }
         
-        // Check if we've reached the limit
-        if (processedCount + errorCount >= limit) {
-            console.log(`Reached processing limit of ${limit} NEW tenders from ${tableName}`);
-            moreToProcess = false;
-        }
-        
         // If we've looked at too many records without finding new ones to process, stop to avoid infinite loops
-        if (skippedCount >= limit * 10) {
-            console.log(`Examined ${skippedCount} existing tenders without finding enough new ones to process. Stopping to avoid excessive database queries.`);
+        if (attemptCount >= limit * 10) {
+            console.log(`Made ${attemptCount} attempts but only found ${processedCount} new tenders to process. Stopping to avoid excessive processing.`);
             moreToProcess = false;
         }
         
         offset += chunkSize;
     }
     
-    console.log(`Completed processing batch from ${tableName}: ${processedCount} processed, ${skippedCount} skipped, ${updatedCount} updated, ${errorCount} errors, ${fallbackCount} fallback normalizations, ${fastNormalizationCount} fast normalizations`);
+    console.log(`Completed processing batch from ${tableName}:`);
+    console.log(`- Successfully processed: ${processedCount} new tenders`);
+    console.log(`- Updated: ${updatedCount} existing tenders`);
+    console.log(`- Skipped: ${skippedCount} tenders`);
+    console.log(`- Errors: ${errorCount}`);
+    console.log(`- Total attempts: ${attemptCount}`);
+    console.log(`- Normalization methods: ${fastNormalizationCount} fast, ${fallbackCount} fallbacks`);
     
     return {
         success: true,
@@ -451,7 +415,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         updated: updatedCount,
         errors: errorCount,
         fallback: fallbackCount,
-        fastNormalization: fastNormalizationCount
+        fastNormalization: fastNormalizationCount,
+        attempts: attemptCount
     };
 }
 
