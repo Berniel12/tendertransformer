@@ -962,9 +962,9 @@ function extractMoney(source, target, sourceFields) {
         if (source[field]) {
             // Check if the field is already an object with value and currency
             if (typeof source[field] === 'object' && source[field].value) {
-                target.estimated_value = source[field].value;
+                target.estimated_value = parseFloat(source[field].value);
                 if (source[field].currency) {
-                    target.currency = source[field].currency;
+                    target.currency = source[field].currency.toUpperCase();
                 }
                 return;
             }
@@ -973,12 +973,19 @@ function extractMoney(source, target, sourceFields) {
             if (typeof source[field] === 'string') {
                 const moneyString = source[field].trim();
                 
-                // Look for currency codes or symbols (3 letter codes or symbols)
+                // First try to extract the numeric value
+                const valueMatch = moneyString.match(/[\d,]+(\.\d+)?/);
+                if (valueMatch) {
+                    // Remove commas and convert to number
+                    target.estimated_value = parseFloat(valueMatch[0].replace(/,/g, ''));
+                }
+                
+                // Then look for currency codes or symbols
                 const currencyRegex = /(\$|€|£|[A-Z]{3})/i;
                 const currencyMatch = moneyString.match(currencyRegex);
                 
                 if (currencyMatch) {
-                    const symbol = currencyMatch[1];
+                    const symbol = currencyMatch[1].toUpperCase();
                     const currencyMap = {
                         '$': 'USD',
                         '€': 'EUR',
@@ -990,16 +997,28 @@ function extractMoney(source, target, sourceFields) {
                         'CHF': 'CHF',
                         'MXN': 'MXN',
                         'LKR': 'LKR',
+                        'PHP': 'PHP',
+                        'XOF': 'XOF',
+                        'INR': 'INR',
+                        'BDT': 'BDT',
+                        'PKR': 'PKR',
+                        'NPR': 'NPR',
+                        'IDR': 'IDR',
+                        'THB': 'THB',
+                        'VND': 'VND',
+                        'CNY': 'CNY',
+                        'KRW': 'KRW',
+                        'AUD': 'AUD',
+                        'NZD': 'NZD',
+                        'CAD': 'CAD',
                         // Add more currency mappings as needed
                     };
-                    target.currency = currencyMap[symbol.toUpperCase()] || symbol.toUpperCase();
+                    target.currency = currencyMap[symbol] || symbol;
                 }
                 
-                // Extract numeric value - handle both "100 USD" and "USD 100" formats
-                const valueMatch = moneyString.match(/[\d,]+(\.\d+)?/);
-                if (valueMatch) {
-                    // Remove commas and convert to number
-                    target.estimated_value = parseFloat(valueMatch[0].replace(/,/g, ''));
+                // Ensure we have a valid numeric value
+                if (target.estimated_value === undefined || isNaN(target.estimated_value)) {
+                    target.estimated_value = null;
                 }
                 
                 return;
