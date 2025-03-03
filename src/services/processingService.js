@@ -296,6 +296,10 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     let updatedCount = 0;
     let attemptCount = 0;
     
+    // Define chunk size and concurrency for batch processing
+    const chunkSize = 25;
+    const concurrency = 5;
+    
     // If we have pre-filtered tenders, use those directly instead of querying the database
     let tendersToProcess = [];
     
@@ -314,10 +318,6 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         const hasTimestampFields = tableInfo.data && tableInfo.data.length > 0;
         const timestampFields = hasTimestampFields ? tableInfo.data.map(col => col.column_name) : [];
         console.log(`Found timestamp fields for table ${tableName}:`, timestampFields);
-        
-        // Define a chunk size for batch processing
-        const chunkSize = 20; // Reduced for better control
-        const concurrency = 5; // Reduced for better stability
         
         // Get all unprocessed tenders first
         let queryBatch = supabaseAdmin.from(tableName)
