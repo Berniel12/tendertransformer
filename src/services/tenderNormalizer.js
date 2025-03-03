@@ -973,19 +973,22 @@ function extractMoney(source, target, sourceFields) {
             if (typeof source[field] === 'string') {
                 const moneyString = source[field].trim();
                 
-                // First try to extract the numeric value
+                // First try to extract the numeric value - handle both formats
                 const valueMatch = moneyString.match(/[\d,]+(\.\d+)?/);
                 if (valueMatch) {
                     // Remove commas and convert to number
-                    target.estimated_value = parseFloat(valueMatch[0].replace(/,/g, ''));
+                    const numericValue = parseFloat(valueMatch[0].replace(/,/g, ''));
+                    if (!isNaN(numericValue)) {
+                        target.estimated_value = numericValue;
+                    }
                 }
                 
                 // Then look for currency codes or symbols
-                const currencyRegex = /(\$|€|£|[A-Z]{3})/i;
+                const currencyRegex = /(\$|€|£|[A-Z]{3})\s*|\s*(\$|€|£|[A-Z]{3})/i;
                 const currencyMatch = moneyString.match(currencyRegex);
                 
                 if (currencyMatch) {
-                    const symbol = currencyMatch[1].toUpperCase();
+                    const symbol = (currencyMatch[1] || currencyMatch[2]).toUpperCase();
                     const currencyMap = {
                         '$': 'USD',
                         '€': 'EUR',
