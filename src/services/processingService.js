@@ -23,24 +23,35 @@ const performanceStats = {
  * @returns {number|null} The numeric value or null if invalid
  */
 function extractNumericValue(value) {
-    if (typeof value === 'number') {
-        return value;
-    }
-    
-    if (!value || typeof value !== 'string') {
-        return null;
-    }
+    if (value === null || value === undefined) return null;
     
     try {
-        // Remove currency codes and symbols
-        const cleanValue = value.replace(/[A-Z]{3}|\$|€|£/g, '')
-            .trim()
-            .replace(/,/g, ''); // Remove commas
+        // If already a number, return it
+        if (typeof value === 'number') return value;
         
+        // Convert to string and clean it up
+        let cleanValue = value.toString()
+            // Remove currency codes (e.g., USD, EUR, LKR)
+            .replace(/[A-Z]{3}\s*/g, '')
+            // Remove currency symbols
+            .replace(/[$€£¥]/g, '')
+            // Remove commas and spaces
+            .replace(/[,\s]/g, '')
+            // Trim whitespace
+            .trim();
+            
+        // Parse the cleaned value
         const numericValue = parseFloat(cleanValue);
-        return isNaN(numericValue) ? null : numericValue;
+        
+        // Ensure we have a valid number
+        if (isNaN(numericValue)) {
+            console.warn(`Could not parse numeric value from: ${value}`);
+            return null;
+        }
+        
+        return numericValue;
     } catch (error) {
-        console.warn(`Error extracting numeric value from ${value}:`, error.message);
+        console.warn(`Failed to extract numeric value from: ${value}`, error);
         return null;
     }
 }
@@ -215,12 +226,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         let queryBatch = supabaseAdmin.from(tableName)
             .select('*');
             
-        // First, prioritize unprocessed tenders
-        if (timestampFields.includes('last_processed_at')) {
-            queryBatch = queryBatch.is('last_processed_at', null);
-        }
-        
-        // Always sort by created_at desc to prioritize newer tenders
+        // Always sort by created_at desc first to prioritize newer tenders
         if (timestampFields.includes('created_at')) {
             queryBatch = queryBatch.order('created_at', { ascending: false });
         } else if (timestampFields.includes('updated_at')) {
@@ -228,7 +234,12 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             queryBatch = queryBatch.order('updated_at', { ascending: false });
         }
         
-        // Add pagination after sorting to ensure we get the newest records
+        // Then filter for unprocessed tenders
+        if (timestampFields.includes('last_processed_at')) {
+            queryBatch = queryBatch.is('last_processed_at', null);
+        }
+        
+        // Finally add pagination
         queryBatch = queryBatch.range(offset, offset + chunkSize - 1);
         
         const { data: tenders, error: fetchError } = await queryBatch;
@@ -244,10 +255,15 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         }
         
         // Log the date range of tenders being processed
-        if (tenders.length > 0 && timestampFields.includes('created_at')) {
-            const newestDate = new Date(tenders[0].created_at).toISOString();
-            const oldestDate = new Date(tenders[tenders.length - 1].created_at).toISOString();
-            console.log(`Processing tenders created between ${newestDate} and ${oldestDate}`);
+        if (tenders.length > 0) {
+            const dateField = timestampFields.includes('created_at') ? 'created_at' : 'updated_at';
+            if (timestampFields.includes(dateField)) {
+                const newestDate = new Date(tenders[0][dateField]).toISOString();
+                const oldestDate = new Date(tenders[tenders.length - 1][dateField]).toISOString();
+                console.log(`Processing batch of ${tenders.length} tenders ${dateField} between:`);
+                console.log(`  Newest: ${newestDate}`);
+                console.log(`  Oldest: ${oldestDate}`);
+            }
         }
         
         // Pre-check which tenders already exist to avoid processing them

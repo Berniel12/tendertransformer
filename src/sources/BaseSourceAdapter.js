@@ -83,6 +83,45 @@ class BaseSourceAdapter {
     
     return normalizedData;
   }
+
+  /**
+   * Extract numeric value from currency string
+   * @param {string|number} value - The currency value to parse
+   * @returns {number|null} The extracted numeric value or null if invalid
+   */
+  extractNumericValue(value) {
+    if (value === null || value === undefined) return null;
+    
+    try {
+      // If already a number, return it
+      if (typeof value === 'number') return value;
+      
+      // Convert to string and clean it up
+      let cleanValue = value.toString()
+        // Remove currency codes (e.g., USD, EUR, LKR)
+        .replace(/[A-Z]{3}\s*/g, '')
+        // Remove currency symbols
+        .replace(/[$€£¥]/g, '')
+        // Remove commas and spaces
+        .replace(/[,\s]/g, '')
+        // Trim whitespace
+        .trim();
+        
+      // Parse the cleaned value
+      const numericValue = parseFloat(cleanValue);
+      
+      // Ensure we have a valid number
+      if (isNaN(numericValue)) {
+        console.warn(`Could not parse numeric value from: ${value}`);
+        return null;
+      }
+      
+      return numericValue;
+    } catch (error) {
+      console.warn(`Failed to extract numeric value from: ${value}`, error);
+      return null;
+    }
+  }
 }
 
 module.exports = BaseSourceAdapter;
