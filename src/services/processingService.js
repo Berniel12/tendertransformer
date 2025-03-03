@@ -4,7 +4,7 @@
  */
 
 // Import required dependencies
-const sourceRegistry = require('../sources/sourceRegistry');
+const sourceRegistry = require('./sourceRegistry');
 const { normalizeTender, evaluateNormalizationNeeds } = require('./tenderNormalizer');
 
 // Configuration options
