@@ -317,6 +317,9 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     // Initialize the existingTenderMap at function scope
     let existingTenderMap = new Map();
     
+    // Initialize timestampFields at function scope
+    let timestampFields = [];
+    
     // If we have pre-filtered tenders, use those directly instead of querying the database
     let tendersToProcess = [];
     
@@ -336,7 +339,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             
             existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
         }
-    } else {
+        
         // Check if table has timestamp fields for incremental processing
         const tableInfo = await supabaseAdmin
             .from('information_schema.columns')
@@ -345,9 +348,20 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             .in('column_name', ['created_at', 'updated_at', 'last_processed_at']);
         
         const hasTimestampFields = tableInfo.data && tableInfo.data.length > 0;
-        const timestampFields = hasTimestampFields ? tableInfo.data.map(col => col.column_name) : [];
+        timestampFields = hasTimestampFields ? tableInfo.data.map(col => col.column_name) : [];
         console.log(`Found timestamp fields for table ${tableName}:`, timestampFields);
-        
+    } else {
+    // Check if table has timestamp fields for incremental processing
+    const tableInfo = await supabaseAdmin
+        .from('information_schema.columns')
+        .select('column_name')
+        .eq('table_name', tableName)
+        .in('column_name', ['created_at', 'updated_at', 'last_processed_at']);
+    
+    const hasTimestampFields = tableInfo.data && tableInfo.data.length > 0;
+    timestampFields = hasTimestampFields ? tableInfo.data.map(col => col.column_name) : [];
+    console.log(`Found timestamp fields for table ${tableName}:`, timestampFields);
+    
         // Get all unprocessed tenders first
         let queryBatch = supabaseAdmin.from(tableName)
             .select('*');
@@ -618,15 +632,15 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
 
                         processedCount++;
                         
-                        if (timestampFields.includes('last_processed_at')) {
-                            await supabaseAdmin
-                                .from(tableName)
-                                .update({ last_processed_at: new Date().toISOString() })
-                                .eq('id', tender.id);
-                        }
-                        
-                        console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
-                        return { success: true };
+                    if (timestampFields.includes('last_processed_at')) {
+                        await supabaseAdmin
+                            .from(tableName)
+                            .update({ last_processed_at: new Date().toISOString() })
+                            .eq('id', tender.id);
+                    }
+                    
+                    console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
+                    return { success: true };
                     } catch (error) {
                         console.error(`Error saving tender: ${error.message}`);
                         errorCount++;
@@ -654,10 +668,10 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     console.log(`- Total attempts: ${attemptCount}`);
     console.log(`- Normalization methods: ${fastNormalizationCount} fast, ${fallbackCount} fallbacks`);
     
-    return {
+            return { 
         success: true,
-        processed: processedCount,
-        skipped: skippedCount,
+                processed: processedCount,
+                skipped: skippedCount,
         updated: updatedCount,
         errors: errorCount,
         fallback: fallbackCount,
