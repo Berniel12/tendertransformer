@@ -18,6 +18,34 @@ const performanceStats = {
 };
 
 /**
+ * Extract numeric value from a currency string
+ * @param {string|number} value - The currency value to parse
+ * @returns {number|null} The numeric value or null if invalid
+ */
+function extractNumericValue(value) {
+    if (typeof value === 'number') {
+        return value;
+    }
+    
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+    
+    try {
+        // Remove currency codes and symbols
+        const cleanValue = value.replace(/[A-Z]{3}|\$|€|£/g, '')
+            .trim()
+            .replace(/,/g, ''); // Remove commas
+        
+        const numericValue = parseFloat(cleanValue);
+        return isNaN(numericValue) ? null : numericValue;
+    } catch (error) {
+        console.warn(`Error extracting numeric value from ${value}:`, error.message);
+        return null;
+    }
+}
+
+/**
  * Process tenders from all sources in a round-robin fashion
  * @param {Object} supabaseAdmin - Supabase admin client
  * @param {Object} options - Processing options
@@ -288,9 +316,25 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     }
                     
                     // CRITICAL FIX: Set url, tender_type, and other fields to null if they are empty strings
+                    // Also handle currency fields
                     Object.keys(normalizedTender).forEach(key => {
-                        if (normalizedTender[key] === '') {
+                        const value = normalizedTender[key];
+                        
+                        // Handle empty strings
+                        if (value === '') {
                             normalizedTender[key] = null;
+                            return;
+                        }
+                        
+                        // Handle currency/numeric fields
+                        if (key === 'estimated_value' || key === 'contract_value' || key.includes('amount') || key.includes('value')) {
+                            const numericValue = extractNumericValue(value);
+                            if (numericValue !== null) {
+                                normalizedTender[key] = numericValue;
+                            } else {
+                                console.warn(`Could not extract numeric value from ${key}: ${value}, setting to null`);
+                                normalizedTender[key] = null;
+                            }
                         }
                     });
                     
