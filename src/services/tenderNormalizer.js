@@ -6,6 +6,12 @@
 const { Actor } = require('apify');
 const fetch = require('node-fetch');
 
+// Performance tracking statistics
+const performanceStats = {
+    fastNormalization: 0,
+    fallbackNormalization: 0
+};
+
 /**
  * Queries the LLM service with the provided prompt
  * @param {string} prompt - The prompt to send to the LLM
@@ -1307,7 +1313,7 @@ async function normalizeTender(tender, sourceTable) {
  * @returns {Object} Normalized tender with metadata
  */
 function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
-    console.log(`Using ${method} normalization for tender: ${tender.id || 'unknown'} from ${sourceTable}`);
+    console.log(`Using ${method} normalization for ${sourceTable}: ${tender.id || 'unknown'}`);
     const startTime = performance.now();
     
     let result;
@@ -1332,9 +1338,9 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
         // Create a minimal normalized object with error information
         result = {
             normalized_method: `${method}-error`,
-            normalized_error: error.message || 'Unknown error in fallback normalization',
+            description: error.message || 'Unknown error in fallback normalization',
             title: tender.title || tender.name || 'Unknown tender',
-            status: 'Error',
+            status: 'error',
             source_data: tender
         };
     }
@@ -1347,10 +1353,6 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
     // Add source info
     result.source_table = sourceTable;
     result.source_id = tender.id;
-    
-    // Add timestamps
-    result.processing_timestamp = new Date().toISOString();
-    result.normalized_processing_time = processingTime;
     
     return result;
 }
