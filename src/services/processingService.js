@@ -73,6 +73,28 @@ function extractNumericValue(value) {
 }
 
 /**
+ * Determines if fast normalization should be used
+ * @param {string} sourceTable - The source table name
+ * @param {Object} normalizationNeeds - The evaluated normalization needs
+ * @returns {boolean} Whether to use fast normalization
+ */
+function shouldUseFastNormalization(sourceTable, normalizationNeeds) {
+    // SAM.gov tenders always use fast normalization
+    if (sourceTable === 'sam_gov') {
+        return true;
+    }
+
+    // Use fast normalization for English tenders with simple content
+    if (normalizationNeeds.language === 'en') {
+        if (normalizationNeeds.minimalContent || (!normalizationNeeds.complexFields && !normalizationNeeds.needsTranslation)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Process tenders from all sources in a round-robin fashion
  * @param {Object} supabaseAdmin - Supabase admin client
  * @param {Object} options - Processing options
@@ -329,29 +351,6 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     
     console.log(`Found ${tendersToProcess.length} new tenders to process after filtering existing ones`);
     
-    // Update normalization evaluation logic
-    const shouldUseFastNormalization = (tender, normalizationNeeds) => {
-        // Always use fast normalization for SAM.gov
-        if (tableName === 'sam_gov') {
-            return true;
-        }
-
-        // Use fast normalization for English tenders with simple content
-        if (normalizationNeeds.language === 'en') {
-            // If content is minimal, use fast normalization
-            if (normalizationNeeds.minimalContent) {
-                return true;
-            }
-            
-            // If no complex fields and no translation needed, use fast normalization
-            if (!normalizationNeeds.complexFields && !normalizationNeeds.needsTranslation) {
-                return true;
-            }
-        }
-
-        return false;
-    };
-
     // Process tenders in chunks with controlled concurrency
     for (let i = 0; i < tendersToProcess.length && processedCount < limit; i += chunkSize) {
         const chunk = tendersToProcess.slice(i, i + chunkSize);
@@ -375,9 +374,9 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     const normalizationNeeds = await evaluateNormalizationNeeds(tender);
                     
                     // Determine normalization method
-                    const useFastNormalization = shouldUseFastNormalization(tender, normalizationNeeds);
+                    const useFastNormalization = shouldUseFastNormalization(tableName, normalizationNeeds);
                     
-                    // Use the adapter to process the tender with determined method
+                    // Use the adapter to process the tender
                     const startTime = Date.now();
                     const normalizedTender = await adapter.processTender(tender, normalizeTender, useFastNormalization);
                     const processingTime = Date.now() - startTime;
@@ -397,18 +396,12 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         const value = normalizedTender[key];
                         if (value === '') {
                             normalizedTender[key] = null;
-                        } else if (schemaFields[key] || key.includes('value')) {
-                            try {
-                                // Always convert numeric fields using extractNumericValue
-                                const numericValue = extractNumericValue(value);
-                                if (numericValue === null && value !== null && value !== undefined) {
-                                    console.warn(`Could not extract numeric value for ${key} from: ${value}, setting to null`);
-                                }
-                                normalizedTender[key] = numericValue;
-                            } catch (error) {
-                                console.warn(`Error processing numeric value for ${key}: ${error.message}`);
-                                normalizedTender[key] = null;
+                        } else if (schemaFields[key]) {
+                            const numericValue = extractNumericValue(value);
+                            if (numericValue === null && value !== null && value !== undefined) {
+                                console.warn(`Could not extract numeric value for ${key} from: ${value}, setting to null`);
                             }
+                            normalizedTender[key] = numericValue;
                         }
                     });
                     
@@ -417,16 +410,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         delete normalizedTender.contract_value;
                     }
                     
-                    // Log normalization completion once
-                    if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
-                        fastNormalizationCount++;
-                    } else if (normalizedTender.normalized_method === 'llm') {
-                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
-                    } else {
-                        console.log(`Fallback normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
-                        fallbackCount++;
-                    }
+                    // Log normalization completion with timing
+                    console.log(`${normalizedTender.normalized_method} normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                     
                     if (normalizedTender.status === 'error') {
                         console.error(`Error normalizing tender: ${normalizedTender.description}`);
