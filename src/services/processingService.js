@@ -283,33 +283,48 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     const sourceIds = allTenders.map(tender => adapter.getSourceId(tender)).filter(id => id);
     const { data: existingTenders } = await supabaseAdmin
         .from('unified_tenders')
-        .select('source_id')
+        .select('source_id, updated_at')
         .eq('source_table', tableName)
         .in('source_id', sourceIds);
     
-    const existingSourceIds = new Set(existingTenders?.map(t => t.source_id) || []);
+    const existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
     
     // Filter out existing tenders before processing
     const tendersToProcess = allTenders.filter(tender => {
         const sourceId = adapter.getSourceId(tender);
-        if (!forceReprocess && existingSourceIds.has(sourceId)) {
-            skippedCount++;
-            // Update last_processed_at for skipped tenders to avoid reprocessing
-            if (timestampFields.includes('last_processed_at')) {
-                supabaseAdmin
-                    .from(tableName)
-                    .update({ last_processed_at: new Date().toISOString() })
-                    .eq('id', tender.id)
-                    .then(() => {
-                        console.log(`Updated last_processed_at for skipped tender ${sourceId}`);
-                    })
-                    .catch(error => {
-                        console.warn(`Failed to update last_processed_at for skipped tender ${sourceId}:`, error.message);
-                    });
+        if (!sourceId) return false;
+
+        const existingTender = existingTenderMap.get(sourceId);
+        if (!existingTender) return true;
+
+        if (forceReprocess) return true;
+
+        // Skip if tender exists and hasn't been updated
+        if (tender.updated_at && existingTender.updated_at) {
+            const tenderDate = new Date(tender.updated_at);
+            const existingDate = new Date(existingTender.updated_at);
+            if (tenderDate <= existingDate) {
+                skippedCount++;
+                // Update last_processed_at for skipped tenders
+                if (timestampFields.includes('last_processed_at')) {
+                    supabaseAdmin
+                        .from(tableName)
+                        .update({ last_processed_at: new Date().toISOString() })
+                        .eq('id', tender.id)
+                        .then(() => {
+                            console.log(`Updated last_processed_at for skipped tender ${sourceId}`);
+                        })
+                        .catch(error => {
+                            console.warn(`Failed to update last_processed_at for skipped tender ${sourceId}:`, error.message);
+                        });
+                }
+                return false;
             }
-            return false;
+            return true;
         }
-        return true;
+
+        skippedCount++;
+        return false;
     });
     
     console.log(`Found ${tendersToProcess.length} new tenders to process after filtering existing ones`);
@@ -370,7 +385,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     // Track performance statistics
                     trackPerformance(tableName, normalizedTender, processingTime);
                     
-                    // Log normalization completion with single message
+                    // Log normalization completion once
                     if (normalizedTender.normalized_method === 'rule-based-fast') {
                         console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                         fastNormalizationCount++;
@@ -429,16 +444,38 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     normalizedTender.source_id = sourceId;
                     
                     try {
+                        // Try to update first if the tender exists
+                        if (existingTenderMap.has(sourceId)) {
+                            const { error: updateError } = await supabaseAdmin
+                                .from('unified_tenders')
+                                .update(normalizedTender)
+                                .eq('source_table', tableName)
+                                .eq('source_id', sourceId);
+
+                            if (!updateError) {
+                                updatedCount++;
+                                processedCount++;
+                                console.log(`Successfully updated tender ${sourceId} from ${tableName}`);
+                                return { success: true };
+                            }
+                        }
+
+                        // If update fails or tender doesn't exist, try insert
                         const { error: insertError } = await supabaseAdmin
                             .from('unified_tenders')
                             .insert(normalizedTender);
                         
                         if (insertError) {
+                            if (insertError.code === '23505') { // Unique violation
+                                console.log(`Tender ${sourceId} from ${tableName} already exists, skipping`);
+                                skippedCount++;
+                                return { success: true };
+                            }
                             console.error(`Error inserting unified tender: ${insertError.message}`);
                             errorCount++;
                             return { success: false, error: insertError.message };
                         }
-                        
+
                         processedCount++;
                         
                         if (timestampFields.includes('last_processed_at')) {
@@ -555,35 +592,10 @@ function logPerformanceStats() {
         const fastPct = Math.round(performanceStats.fastNormalization / totalProcessed * 100);
         const fallbackPct = Math.round(performanceStats.fallbackNormalization / totalProcessed * 100);
         
-        console.log(`Normalization methods:`);
+        console.log('Normalization methods:');
         console.log(`  - LLM: ${performanceStats.llmUsed} (${llmPct}%)`);
         console.log(`  - Fast: ${performanceStats.fastNormalization} (${fastPct}%)`);
         console.log(`  - Fallback: ${performanceStats.fallbackNormalization} (${fallbackPct}%)`);
-        
-        // Source-specific stats
-        console.log('\nBreakdown by source:');
-        Object.entries(performanceStats.bySource).forEach(([source, stats]) => {
-            if (stats.totalProcessed === 0) return;
-            
-            const sourceAvgTime = stats.processingTimes.reduce((a, b) => a + b, 0) / stats.processingTimes.length;
-            const sourceLlmPct = Math.round(stats.llmUsed / stats.totalProcessed * 100);
-            const sourceFastPct = Math.round(stats.fastNormalization / stats.totalProcessed * 100);
-            const sourceFallbackPct = Math.round(stats.fallbackNormalization / stats.totalProcessed * 100);
-            
-            console.log(`\n${source}:`);
-            console.log(`  - Total processed: ${stats.totalProcessed}`);
-            console.log(`  - Average processing time: ${sourceAvgTime.toFixed(2)} ms`);
-            console.log(`  - Normalization: ${sourceLlmPct}% LLM, ${sourceFastPct}% fast, ${sourceFallbackPct}% fallback`);
-        });
-        
-        // Estimated cost savings
-        // Assuming $0.01 per LLM call saved through fast normalization
-        const costSaved = performanceStats.fastNormalization * 0.01;
-        console.log(`\nEstimated cost savings: $${costSaved.toFixed(2)} (based on $0.01 per LLM call saved)`);
-        
-        // Potential improvements
-        const potentialSavings = (performanceStats.llmUsed * 0.01).toFixed(2);
-        console.log(`Potential additional cost savings: $${potentialSavings} (if all remaining LLM calls could be optimized)`);
         
         // Reset temporary counters but keep running totals
         performanceStats.processingTimes = [];
@@ -592,108 +604,6 @@ function logPerformanceStats() {
         });
     } catch (error) {
         console.warn('Error logging performance stats:', error.message);
-    }
-}
-
-// Add a function to get all registered source adapters
-function getAllSourceTables() {
-    return sourceRegistry.getRegisteredSources();
-}
-
-/**
- * Run continuous processing of tenders from all sources until stopped
- * This function will process tenders in a round-robin fashion indefinitely
- * @param {Object} supabaseAdmin - Supabase admin client
- * @param {Object} options - Processing options
- * @param {number} options.tendersPerSource - Number of tenders to process from each source in each round
- * @param {number} options.waitMinutes - Minutes to wait between processing rounds
- * @returns {Promise<void>}
- */
-async function runContinuousProcessing(supabaseAdmin, options = {}) {
-    const { 
-        tendersPerSource = 50,  // Process more tenders per source in continuous mode
-        waitMinutes = process.env.PROCESSING_INTERVAL_MINUTES ? 
-            parseInt(process.env.PROCESSING_INTERVAL_MINUTES) : 5
-    } = options;
-    
-    console.log(`Starting continuous processing of all sources. Will process up to ${tendersPerSource} tenders per source in each round.`);
-    console.log(`Will wait ${waitMinutes} minutes between processing rounds.`);
-    console.log('Press Ctrl+C to stop processing.\n');
-    
-    // Setup graceful shutdown
-    let shouldContinue = true;
-    
-    const handleShutdown = async () => {
-        console.log('\nGraceful shutdown initiated. Completing current processing...');
-        shouldContinue = false;
-        // Don't exit right away, let the current round finish
-    };
-    
-    // Handle SIGINT (Ctrl+C) and SIGTERM
-    process.on('SIGINT', handleShutdown);
-    process.on('SIGTERM', handleShutdown);
-    
-    let round = 1;
-    let totalProcessed = 0;
-    let startTime = Date.now();
-    
-    try {
-        while (shouldContinue) {
-            console.log(`\n=== Starting processing round ${round} ===`);
-            const roundStartTime = Date.now();
-            
-            const results = await processTendersFromAllSources(supabaseAdmin, {
-                tendersPerSource,
-                continuous: true
-            });
-            
-            const roundEndTime = Date.now();
-            const roundDurationMinutes = ((roundEndTime - roundStartTime) / 1000 / 60).toFixed(2);
-            
-            totalProcessed += results.processed;
-            const totalProcessedPerMinute = (totalProcessed / ((roundEndTime - startTime) / 1000 / 60)).toFixed(2);
-            
-            console.log(`\n=== Completed processing round ${round} ===`);
-            console.log(`Round duration: ${roundDurationMinutes} minutes`);
-            console.log(`Total tenders processed since start: ${totalProcessed}`);
-            console.log(`Overall processing rate: ${totalProcessedPerMinute} tenders per minute`);
-            
-            if (!shouldContinue) {
-                console.log('Shutting down as requested...');
-                break;
-            }
-            
-            // Adjust wait time based on whether tenders were processed
-            // If nothing was processed, we might want to wait longer
-            const actualWaitMinutes = results.processed > 0 ? waitMinutes : Math.min(waitMinutes * 2, 30);
-            
-            if (actualWaitMinutes > 0) {
-                console.log(`Waiting ${actualWaitMinutes} minutes before next processing round...`);
-                await new Promise(resolve => setTimeout(resolve, actualWaitMinutes * 60 * 1000));
-            }
-            
-            // Check if we should continue
-            if (!shouldContinue) {
-                console.log('Shutting down as requested during wait period...');
-                break;
-            }
-            
-            round++;
-        }
-    } catch (error) {
-        console.error('Error during continuous processing:', error);
-        throw error;
-    } finally {
-        // Remove event listeners
-        process.removeListener('SIGINT', handleShutdown);
-        process.removeListener('SIGTERM', handleShutdown);
-        
-        console.log('\nContinuous processing completed or stopped.');
-        console.log(`Total rounds: ${round}`);
-        console.log(`Total tenders processed: ${totalProcessed}`);
-        
-        const totalDurationHours = ((Date.now() - startTime) / 1000 / 60 / 60).toFixed(2);
-        console.log(`Total runtime: ${totalDurationHours} hours`);
     }
 }
 
