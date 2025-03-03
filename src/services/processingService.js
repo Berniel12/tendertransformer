@@ -317,7 +317,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     // Process tenders in chunks with controlled concurrency
     for (let i = 0; i < tendersToProcess.length && processedCount < limit; i += chunkSize) {
         const chunk = tendersToProcess.slice(i, i + chunkSize);
-        console.log(`Processing chunk ${Math.floor(i/chunkSize) + 1} with ${chunk.length} tenders`);
+        console.log(`Processing chunk from ${i} to ${i + chunk.length} of ${tendersToProcess.length}`);
         
         const results = await Promise.all(
             chunk.map(async (tender, index) => {
@@ -330,12 +330,29 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Log the tender's creation date if available
                     if (tender.created_at) {
-                        console.log(`Processing tender ${sourceId} created at ${new Date(tender.created_at).toISOString()}`);
+                        console.log(`Processing tender ${attemptCount}/${tendersToProcess.length} from ${tableName}`);
+                    }
+                    
+                    // Evaluate normalization needs first
+                    console.log(`Evaluating normalization needs for tender from ${tableName}`);
+                    const normalizationNeeds = await evaluateNormalizationNeeds(tender);
+                    
+                    // Use fast normalization for English tenders or minimal content
+                    let shouldUseFastNormalization = false;
+                    if (normalizationNeeds.language === 'en' && !normalizationNeeds.complexFields) {
+                        console.log(`Using fast normalization for tender: English tender with some missing fields can use direct parsing`);
+                        shouldUseFastNormalization = true;
+                    } else if (normalizationNeeds.minimalContent) {
+                        console.log(`Using fast normalization for tender: Tender content is minimal, using direct parsing`);
+                        shouldUseFastNormalization = true;
+                    } else if (!normalizationNeeds.needsTranslation && !normalizationNeeds.complexFields) {
+                        console.log(`Using fast normalization for tender: Simple tender with no translation needed`);
+                        shouldUseFastNormalization = true;
                     }
                     
                     // Use the adapter to process the tender
                     const startTime = Date.now();
-                    const normalizedTender = await adapter.processTender(tender, normalizeTender);
+                    const normalizedTender = await adapter.processTender(tender, normalizeTender, shouldUseFastNormalization);
                     const processingTime = Date.now() - startTime;
                     
                     // Track performance statistics
@@ -346,8 +363,10 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         console.log(`Tender ${sourceId} normalized using rule-based fallback`);
                         fallbackCount++;
                     } else if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        console.log(`Tender ${sourceId} normalized using fast method`);
+                        console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                         fastNormalizationCount++;
+                    } else {
+                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                     }
                     
                     if (normalizedTender.status === 'error') {
@@ -422,7 +441,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                                 .eq('id', tender.id);
                         }
                         
-                        console.log(`Successfully processed tender ${sourceId}`);
+                        console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
                         return { success: true };
                     } catch (error) {
                         console.error(`Error saving tender: ${error.message}`);
