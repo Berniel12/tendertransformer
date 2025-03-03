@@ -13,6 +13,8 @@ const CONFIG = {
     useWbFastNormalization: true,
     // Set to true to use fast normalization for ADB tenders to prevent timeouts
     useAdbFastNormalization: true,
+    // Set to true to use fast normalization for AFD tenders to prevent timeouts
+    useAfdFastNormalization: true,
     // Timeout for LLM normalization in milliseconds (default: 20 seconds)
     llmNormalizationTimeout: 20000
 };
@@ -102,6 +104,11 @@ function shouldUseFastNormalization(sourceTable, normalizationNeeds) {
     
     // Use fast normalization for ADB tenders if configured
     if (sourceTable === 'adb' && CONFIG.useAdbFastNormalization) {
+        return true;
+    }
+    
+    // Use fast normalization for AFD tenders if configured
+    if (sourceTable === 'afd_tenders' && CONFIG.useAfdFastNormalization) {
         return true;
     }
 
@@ -494,6 +501,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         normalizationReason = "World Bank tenders using optimized fast path (configured for performance)";
                     } else if (tableName === 'adb' && CONFIG.useAdbFastNormalization) {
                         normalizationReason = "ADB tenders using optimized fast path (configured for performance)";
+                    } else if (tableName === 'afd_tenders' && CONFIG.useAfdFastNormalization) {
+                        normalizationReason = "AFD tenders using optimized fast path (configured for performance)";
                     } else if (tender.description && tender.description.length > 10000) {
                         normalizationReason = "Tender description exceeds optimal size for LLM processing, using chunked parsing";
                     } else if (normalizationNeeds.minimalContent) {

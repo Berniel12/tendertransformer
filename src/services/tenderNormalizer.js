@@ -650,6 +650,13 @@ function evaluateNormalizationNeeds(tender, sourceTable) {
         result.reason = "ADB tenders use fast normalization to prevent timeouts";
         return result;
     }
+    
+    // Fast path for AFD tenders - immediately return without further checks
+    if (sourceTable === "afd_tenders") {
+        result.needsLLM = false;
+        result.reason = "AFD tenders use fast normalization to prevent timeouts";
+        return result;
+    }
 
     // 1. Source-based rules - expand to cover more sources
     if (sourceTable === "sam_gov") {
@@ -862,23 +869,20 @@ function isEnglishText(text) {
 }
 
 /**
- * Fast rule-based normalization for tenders that don't need LLM
- * @param {Object} tender - The tender data to normalize
- * @param {string} sourceTable - The source table name
- * @returns {Object} Normalized tender
+ * Normalizes a tender using fast rule-based approaches
+ * @param {Object} tenderData - The tender data to normalize
+ * @param {string} sourceTable - The name of the source table
+ * @returns {Object} Normalized tender data with appropriate fields
  */
-function fastNormalizeTender(tender, sourceTable) {
-    // If the source table has a dedicated fallback handler, use that
-    // This gives us the most accurate field mapping for each source
-    if (sourceTable === 'sam_gov' || 
-        sourceTable === 'ted' ||
-        sourceTable === 'iadb' ||
-        sourceTable === 'un_procurement' ||
-        sourceTable === 'adb') {
+async function fastNormalizeTender(tenderData, sourceTable) {
+    console.log(`Using fast normalization for tender: ${tenderData.id || 'unknown'}`);
+    
+    // Check if this source has a dedicated fallback handler
+    const dedicatedSources = ['sam_gov', 'ted', 'iadb', 'un_procurement', 'adb', 'afd_tenders'];
+    
+    if (dedicatedSources.includes(sourceTable)) {
         console.log(`Using dedicated handler for ${sourceTable}`);
-        const normalizedData = fallbackNormalizeTender(tender, sourceTable);
-        normalizedData.normalized_method = 'rule-based-fast'; // Override the method name
-        return normalizedData;
+        return fallbackNormalizeTender(tenderData, sourceTable, 'rule-based-fast');
     }
     
     // Generic handling for other sources
@@ -921,36 +925,36 @@ function fastNormalizeTender(tender, sourceTable) {
     };
     
     // Common field mapping - try different field names across sources
-    mapField(tender, normalized, 'title', ['title', 'opportunity_title', 'name', 'project_name', 'contract_title']);
-    mapField(tender, normalized, 'description', ['description', 'body', 'summary', 'details', 'project_description']);
-    mapField(tender, normalized, 'status', ['status', 'state', 'opportunity_status', 'tender_status']);
-    mapField(tender, normalized, 'country', ['country', 'country_name', 'nation', 'location_country']);
-    mapField(tender, normalized, 'city', ['city', 'town', 'location_city', 'place']);
-    mapField(tender, normalized, 'organization_name', ['organization_name', 'agency', 'authority', 'contracting_authority', 'buyer_name']);
-    mapField(tender, normalized, 'organization_id', ['organization_id', 'agency_id', 'authority_id']);
-    mapField(tender, normalized, 'notice_id', ['notice_id', 'id', 'tender_id', 'opportunity_id', 'document_number']);
-    mapField(tender, normalized, 'reference_number', ['reference_number', 'reference', 'ref', 'solicitation_number']);
+    mapField(tenderData, normalized, 'title', ['title', 'opportunity_title', 'name', 'project_name', 'contract_title']);
+    mapField(tenderData, normalized, 'description', ['description', 'body', 'summary', 'details', 'project_description']);
+    mapField(tenderData, normalized, 'status', ['status', 'state', 'opportunity_status', 'tender_status']);
+    mapField(tenderData, normalized, 'country', ['country', 'country_name', 'nation', 'location_country']);
+    mapField(tenderData, normalized, 'city', ['city', 'town', 'location_city', 'place']);
+    mapField(tenderData, normalized, 'organization_name', ['organization_name', 'agency', 'authority', 'contracting_authority', 'buyer_name']);
+    mapField(tenderData, normalized, 'organization_id', ['organization_id', 'agency_id', 'authority_id']);
+    mapField(tenderData, normalized, 'notice_id', ['notice_id', 'id', 'tender_id', 'opportunity_id', 'document_number']);
+    mapField(tenderData, normalized, 'reference_number', ['reference_number', 'reference', 'ref', 'solicitation_number']);
     
     // Try to extract the language if provided
-    mapField(tender, normalized, 'language', ['language', 'lang']);
+    mapField(tenderData, normalized, 'language', ['language', 'lang']);
     
     // Handle dates with various formats
-    extractDate(tender, normalized, 'publication_date', ['publication_date', 'published', 'publish_date', 'issued_date', 'created_at']);
-    extractDate(tender, normalized, 'deadline_date', ['deadline_date', 'deadline', 'closing_date', 'response_date', 'submission_deadline']);
+    extractDate(tenderData, normalized, 'publication_date', ['publication_date', 'published', 'publish_date', 'issued_date', 'created_at']);
+    extractDate(tenderData, normalized, 'deadline_date', ['deadline_date', 'deadline', 'closing_date', 'response_date', 'submission_deadline']);
     
     // Extract money values and currency
-    extractMoney(tender, normalized, ['value', 'amount', 'contract_value', 'estimated_value', 'budget']);
+    extractMoney(tenderData, normalized, ['value', 'amount', 'contract_value', 'estimated_value', 'budget']);
     
     // Extract email from description or explicit fields
-    extractContacts(tender, normalized);
+    extractContacts(tenderData, normalized);
     
     // Extract document links if present
-    extractDocumentLinks(tender, normalized);
+    extractDocumentLinks(tenderData, normalized);
     
     // Normalize URL field
-    if (tender.url) normalized.url = tender.url;
-    else if (tender.link) normalized.url = tender.link;
-    else if (tender.web_link) normalized.url = tender.web_link;
+    if (tenderData.url) normalized.url = tenderData.url;
+    else if (tenderData.link) normalized.url = tenderData.link;
+    else if (tenderData.web_link) normalized.url = tenderData.web_link;
     
     // Infer status from dates if not explicitly provided
     inferStatusFromDates(normalized);
@@ -1296,35 +1300,59 @@ async function normalizeTender(tender, sourceTable) {
 }
 
 /**
- * Helper function to apply fallback normalization with metadata
- * @param {Object} tender - The tender data
- * @param {string} sourceTable - Source table name
- * @param {string} reason - Reason for fallback
- * @param {number} startTime - Processing start time in milliseconds
+ * Fallback normalization with additional metadata
+ * @param {Object} tender - The tender data to normalize
+ * @param {string} sourceTable - The source table name
+ * @param {string} [method='fallback'] - The normalization method to record
  * @returns {Object} Normalized tender with metadata
  */
-function fallbackWithMetadata(tender, sourceTable, reason, startTime) {
-    const normalizedData = fallbackNormalizeTender(tender, sourceTable);
+function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
+    console.log(`Using ${method} normalization for tender: ${tender.id || 'unknown'} from ${sourceTable}`);
+    const startTime = performance.now();
     
-    const endTime = Date.now();
-    
-    // For ADB tenders, use different logging to indicate this is a fast path, not a fallback
-    if (sourceTable === 'adb') {
-        console.log(`Fast normalization completed in ${(endTime - startTime) / 1000} seconds`);
-        // Set the method to fast normalization for clarity
-        normalizedData.normalized_method = 'rule-based-fast';
-    } else {
-        console.log(`Fallback normalization completed in ${(endTime - startTime) / 1000} seconds`);
-        normalizedData.normalized_method = 'rule-based-fallback';
+    let result;
+    try {
+        result = fallbackNormalizeTender(tender, sourceTable);
+        
+        // Handle special cases
+        if (sourceTable === 'adb' && method === 'rule-based-fast') {
+            console.log('Fast normalization completed for ADB tender using optimized path');
+            performanceStats.fastNormalization++;
+            result.normalized_method = 'rule-based-fast';
+        } else if (sourceTable === 'afd_tenders' && method === 'rule-based-fast') {
+            console.log('Fast normalization completed for AFD tender using optimized path');
+            performanceStats.fastNormalization++;
+            result.normalized_method = 'rule-based-fast';
+        } else {
+            performanceStats.fallbackNormalization++;
+            result.normalized_method = method;
+        }
+    } catch (error) {
+        console.error(`Error in fallback normalization for ${sourceTable}:`, error);
+        // Create a minimal normalized object with error information
+        result = {
+            normalized_method: `${method}-error`,
+            normalized_error: error.message || 'Unknown error in fallback normalization',
+            title: tender.title || tender.name || 'Unknown tender',
+            status: 'Error',
+            source_data: tender
+        };
     }
     
-    // Add metadata
-    normalizedData.normalized_at = new Date().toISOString();
-    normalizedData.fallback_reason = reason;
-    normalizedData.source_table = sourceTable;
-    normalizedData.processing_time_ms = endTime - startTime;
+    const endTime = performance.now();
+    const processingTime = (endTime - startTime) / 1000; // Convert to seconds
     
-    return normalizedData;
+    console.log(`${method === 'rule-based-fast' ? 'Fast' : 'Fallback'} normalization completed in ${processingTime.toFixed(3)} seconds`);
+    
+    // Add source info
+    result.source_table = sourceTable;
+    result.source_id = tender.id;
+    
+    // Add timestamps
+    result.processing_timestamp = new Date().toISOString();
+    result.normalized_processing_time = processingTime;
+    
+    return result;
 }
 
 /**
