@@ -314,6 +314,29 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     
     console.log(`Found ${tendersToProcess.length} new tenders to process after filtering existing ones`);
     
+    // Update normalization evaluation logic
+    const shouldUseFastNormalization = (tender, normalizationNeeds) => {
+        // Always use fast normalization for SAM.gov
+        if (tableName === 'sam_gov') {
+            return true;
+        }
+
+        // Use fast normalization for English tenders with simple content
+        if (normalizationNeeds.language === 'en') {
+            // If content is minimal, use fast normalization
+            if (normalizationNeeds.minimalContent) {
+                return true;
+            }
+            
+            // If no complex fields and no translation needed, use fast normalization
+            if (!normalizationNeeds.complexFields && !normalizationNeeds.needsTranslation) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
     // Process tenders in chunks with controlled concurrency
     for (let i = 0; i < tendersToProcess.length && processedCount < limit; i += chunkSize) {
         const chunk = tendersToProcess.slice(i, i + chunkSize);
@@ -334,38 +357,28 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     }
                     
                     // Evaluate normalization needs first
-                    console.log(`Evaluating normalization needs for tender from ${tableName}`);
                     const normalizationNeeds = await evaluateNormalizationNeeds(tender);
                     
-                    // Use fast normalization for English tenders or minimal content
-                    let shouldUseFastNormalization = false;
-                    if (tableName === 'sam_gov') {
-                        shouldUseFastNormalization = true;
-                    } else if (normalizationNeeds.language === 'en' && !normalizationNeeds.complexFields) {
-                        shouldUseFastNormalization = true;
-                    } else if (normalizationNeeds.minimalContent) {
-                        shouldUseFastNormalization = true;
-                    } else if (!normalizationNeeds.needsTranslation && !normalizationNeeds.complexFields) {
-                        shouldUseFastNormalization = true;
-                    }
+                    // Determine normalization method
+                    const useFastNormalization = shouldUseFastNormalization(tender, normalizationNeeds);
                     
-                    // Use the adapter to process the tender
+                    // Use the adapter to process the tender with determined method
                     const startTime = Date.now();
-                    const normalizedTender = await adapter.processTender(tender, normalizeTender, shouldUseFastNormalization);
+                    const normalizedTender = await adapter.processTender(tender, normalizeTender, useFastNormalization);
                     const processingTime = Date.now() - startTime;
                     
                     // Track performance statistics
                     trackPerformance(tableName, normalizedTender, processingTime);
                     
-                    // Log normalization method - simplified and more consistent messaging
+                    // Log normalization completion with single message
                     if (normalizedTender.normalized_method === 'rule-based-fast') {
                         console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                         fastNormalizationCount++;
-                    } else if (normalizedTender.normalized_method === 'rule-based-fallback') {
+                    } else if (normalizedTender.normalized_method === 'llm') {
+                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
+                    } else {
                         console.log(`Using fallback normalization for ${tableName}`);
                         fallbackCount++;
-                    } else {
-                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                     }
                     
                     if (normalizedTender.status === 'error') {
