@@ -39,21 +39,35 @@ function extractNumericValue(value) {
             .replace(/[,\s]/g, '')
             // Remove any trailing currency codes that might remain
             .replace(/\s*[A-Z]{3}$/g, '')
+            // Remove any remaining non-numeric characters except decimal point and minus sign
+            .replace(/[^\d.-]/g, '')
             // Trim whitespace
             .trim();
             
+        // Handle edge cases
+        if (cleanValue === '' || cleanValue === '.' || cleanValue === '-') {
+            console.warn(`Invalid numeric string after cleaning: "${cleanValue}" from original value: "${value}"`);
+            return null;
+        }
+        
         // Parse the cleaned value
         const numericValue = parseFloat(cleanValue);
         
         // Ensure we have a valid number
         if (isNaN(numericValue)) {
-            console.warn(`Could not parse numeric value from: ${value}`);
+            console.warn(`Could not parse numeric value from: "${value}", cleaned value was: "${cleanValue}"`);
+            return null;
+        }
+        
+        // Ensure the value is reasonable (no extremely large or small numbers)
+        if (!Number.isFinite(numericValue) || Math.abs(numericValue) > 1e15) {
+            console.warn(`Numeric value out of reasonable range: ${numericValue} from: "${value}"`);
             return null;
         }
         
         return numericValue;
     } catch (error) {
-        console.warn(`Failed to extract numeric value from: ${value}`, error);
+        console.warn(`Failed to extract numeric value from: "${value}"`, error);
         return null;
     }
 }
@@ -107,40 +121,55 @@ async function processTendersFromAllSources(supabaseAdmin, options = {}) {
         };
     }
     
-    // Process each source in sequence
-    for (const sourceTable of sources) {
-        console.log(`\nProcessing ${sourceTable}...`);
+    // Calculate batch size for round-robin processing
+    const batchSize = Math.min(5, Math.floor(tendersPerSource / 4)); // Process smaller batches for better distribution
+    
+    // Process sources in rounds
+    let remainingTenders = tendersPerSource;
+    while (remainingTenders > 0) {
+        const currentBatchSize = Math.min(batchSize, remainingTenders);
+        console.log(`\nProcessing round with batch size ${currentBatchSize}, remaining tenders per source: ${remainingTenders}`);
         
-        const result = await processTendersFromTable(supabaseAdmin, sourceTable, tendersPerSource);
-        
-        // Aggregate results
-        totalResults.processed += result.processed;
-        totalResults.skipped += result.skipped;
-        totalResults.updated += result.updated || 0;
-        totalResults.errors += result.errors;
-        totalResults.fallback += result.fallback || 0;
-        totalResults.fastNormalization += result.fastNormalization || 0;
-        
-        // Update source-specific results
-        totalResults.bySource[sourceTable].processed += result.processed;
-        totalResults.bySource[sourceTable].skipped += result.skipped;
-        totalResults.bySource[sourceTable].updated += result.updated || 0;
-        totalResults.bySource[sourceTable].errors += result.errors;
-        totalResults.bySource[sourceTable].fallback += result.fallback || 0;
-        totalResults.bySource[sourceTable].fastNormalization += result.fastNormalization || 0;
-        
-        console.log(`Completed processing ${sourceTable}:`);
-        console.log(`- Processed: ${result.processed}`);
-        console.log(`- Skipped: ${result.skipped}`);
-        console.log(`- Updated: ${result.updated || 0}`);
-        console.log(`- Errors: ${result.errors}`);
-        console.log(`- Normalization: ${result.fastNormalization || 0} fast, ${result.fallback || 0} fallbacks`);
-        
-        // If in continuous mode and we've processed enough from this source, continue to next
-        if (continuous && result.processed + result.skipped === 0) {
-            console.log(`No more tenders to process from ${sourceTable}, moving to next source`);
-            continue;
+        for (const sourceTable of sources) {
+            console.log(`\nProcessing batch from ${sourceTable}...`);
+            
+            const result = await processTendersFromTable(supabaseAdmin, sourceTable, currentBatchSize);
+            
+            // Aggregate results
+            totalResults.processed += result.processed;
+            totalResults.skipped += result.skipped;
+            totalResults.updated += result.updated || 0;
+            totalResults.errors += result.errors;
+            totalResults.fallback += result.fallback || 0;
+            totalResults.fastNormalization += result.fastNormalization || 0;
+            
+            // Update source-specific results
+            totalResults.bySource[sourceTable].processed += result.processed;
+            totalResults.bySource[sourceTable].skipped += result.skipped;
+            totalResults.bySource[sourceTable].updated += result.updated || 0;
+            totalResults.bySource[sourceTable].errors += result.errors;
+            totalResults.bySource[sourceTable].fallback += result.fallback || 0;
+            totalResults.bySource[sourceTable].fastNormalization += result.fastNormalization || 0;
+            
+            console.log(`Completed batch from ${sourceTable}:`);
+            console.log(`- Processed: ${result.processed}`);
+            console.log(`- Skipped: ${result.skipped}`);
+            console.log(`- Updated: ${result.updated || 0}`);
+            console.log(`- Errors: ${result.errors}`);
+            console.log(`- Normalization: ${result.fastNormalization || 0} fast, ${result.fallback || 0} fallbacks`);
+            
+            // If in continuous mode and we've processed nothing from this source, skip it in future rounds
+            if (continuous && result.processed + result.skipped === 0) {
+                console.log(`No more tenders to process from ${sourceTable}, removing from round-robin`);
+                sources.splice(sources.indexOf(sourceTable), 1);
+                if (sources.length === 0) {
+                    console.log('No more sources with tenders to process');
+                    return totalResults;
+                }
+            }
         }
+        
+        remainingTenders -= currentBatchSize;
     }
     
     // Log overall results
@@ -206,8 +235,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     console.log(`Found timestamp fields for table ${tableName}:`, timestampFields);
     
     // Define a chunk size for batch processing
-    const chunkSize = 50; // Increased for better efficiency
-    const concurrency = 10; // Increased for faster processing
+    const chunkSize = 20; // Reduced for better control
+    const concurrency = 5; // Reduced for better stability
     
     // Get all unprocessed tenders first
     let queryBatch = supabaseAdmin.from(tableName)
@@ -263,10 +292,27 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     // Filter out existing tenders before processing
     const tendersToProcess = allTenders.filter(tender => {
         const sourceId = adapter.getSourceId(tender);
-        return forceReprocess || !existingSourceIds.has(sourceId);
+        if (!forceReprocess && existingSourceIds.has(sourceId)) {
+            skippedCount++;
+            // Update last_processed_at for skipped tenders to avoid reprocessing
+            if (timestampFields.includes('last_processed_at')) {
+                supabaseAdmin
+                    .from(tableName)
+                    .update({ last_processed_at: new Date().toISOString() })
+                    .eq('id', tender.id)
+                    .then(() => {
+                        console.log(`Updated last_processed_at for skipped tender ${sourceId}`);
+                    })
+                    .catch(error => {
+                        console.warn(`Failed to update last_processed_at for skipped tender ${sourceId}:`, error.message);
+                    });
+            }
+            return false;
+        }
+        return true;
     });
     
-    console.log(`Found ${tendersToProcess.length} new tenders to process`);
+    console.log(`Found ${tendersToProcess.length} new tenders to process after filtering existing ones`);
     
     // Process tenders in chunks with controlled concurrency
     for (let i = 0; i < tendersToProcess.length && processedCount < limit; i += chunkSize) {
@@ -315,17 +361,39 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         const value = normalizedTender[key];
                         if (value === '') {
                             normalizedTender[key] = null;
-                        } else if (key === 'estimated_value' || key === 'contract_value' || key.includes('amount') || key.includes('value')) {
+                        } else if (
+                            key === 'estimated_value' || 
+                            key === 'contract_value' || 
+                            key === 'award_amount' ||
+                            key === 'potential_award_amount' ||
+                            key.includes('amount') || 
+                            key.includes('value')
+                        ) {
                             try {
+                                // Always convert numeric fields using extractNumericValue
                                 const numericValue = extractNumericValue(value);
                                 if (numericValue === null) {
                                     console.warn(`Could not extract numeric value for ${key} from: ${value}, setting to null`);
                                     normalizedTender[key] = null;
                                 } else {
+                                    console.log(`Successfully extracted numeric value for ${key}: ${numericValue} from ${value}`);
                                     normalizedTender[key] = numericValue;
                                 }
                             } catch (error) {
                                 console.warn(`Error processing numeric value for ${key}: ${error.message}`);
+                                normalizedTender[key] = null;
+                            }
+                        }
+                    });
+                    
+                    // Double-check numeric fields before insertion
+                    ['estimated_value', 'contract_value', 'award_amount', 'potential_award_amount'].forEach(key => {
+                        if (normalizedTender[key] !== null && typeof normalizedTender[key] !== 'number') {
+                            console.warn(`Found non-numeric value in ${key}: ${normalizedTender[key]}, attempting to clean...`);
+                            try {
+                                normalizedTender[key] = extractNumericValue(normalizedTender[key]);
+                            } catch (error) {
+                                console.warn(`Failed to clean ${key}, setting to null`);
                                 normalizedTender[key] = null;
                             }
                         }
