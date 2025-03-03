@@ -971,10 +971,12 @@ function extractMoney(source, target, sourceFields) {
             
             // If it's a string, try to extract numeric value and currency
             if (typeof source[field] === 'string') {
-                const moneyString = source[field];
+                const moneyString = source[field].trim();
                 
-                // Look for currency symbols or codes
-                const currencyMatch = moneyString.match(/(\$|€|£|USD|EUR|GBP|JPY|CHF)/i);
+                // Look for currency codes or symbols (3 letter codes or symbols)
+                const currencyRegex = /(\$|€|£|[A-Z]{3})/i;
+                const currencyMatch = moneyString.match(currencyRegex);
+                
                 if (currencyMatch) {
                     const symbol = currencyMatch[1];
                     const currencyMap = {
@@ -985,12 +987,15 @@ function extractMoney(source, target, sourceFields) {
                         'EUR': 'EUR',
                         'GBP': 'GBP',
                         'JPY': 'JPY',
-                        'CHF': 'CHF'
+                        'CHF': 'CHF',
+                        'MXN': 'MXN',
+                        'LKR': 'LKR',
+                        // Add more currency mappings as needed
                     };
-                    target.currency = currencyMap[symbol] || symbol;
+                    target.currency = currencyMap[symbol.toUpperCase()] || symbol.toUpperCase();
                 }
                 
-                // Extract numeric value
+                // Extract numeric value - handle both "100 USD" and "USD 100" formats
                 const valueMatch = moneyString.match(/[\d,]+(\.\d+)?/);
                 if (valueMatch) {
                     // Remove commas and convert to number
