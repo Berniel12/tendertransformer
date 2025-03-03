@@ -1267,6 +1267,45 @@ function extractTenderStatus(tenderData, sourceTable) {
 }
 
 /**
+ * Extracts a numeric value from various input formats
+ * @param {*} value - The value to extract a number from
+ * @returns {number|null} - The extracted number or null if extraction fails
+ */
+function extractNumericValue(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    
+    // If it's already a number, return it directly
+    if (typeof value === 'number') {
+        return value;
+    }
+    
+    // If it's a string, try to extract a numeric value
+    if (typeof value === 'string') {
+        // Remove non-numeric characters except decimal point and parse
+        const numericString = value.replace(/[^0-9.]/g, '');
+        const parsed = parseFloat(numericString);
+        
+        if (!isNaN(parsed)) {
+            return parsed;
+        }
+    }
+    
+    // If it's an object with a numeric property, attempt to use that
+    if (typeof value === 'object') {
+        if (value.value && !isNaN(parseFloat(value.value))) {
+            return parseFloat(value.value);
+        }
+        if (value.amount && !isNaN(parseFloat(value.amount))) {
+            return parseFloat(value.amount);
+        }
+    }
+    
+    return null;
+}
+
+/**
  * Rule-based tender normalization that works without LLM
  * This is used as a fallback when the LLM service is unavailable
  * 
