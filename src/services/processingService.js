@@ -300,6 +300,9 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     const chunkSize = 25;
     const concurrency = 5;
     
+    // Initialize the existingTenderMap at function scope
+    let existingTenderMap = new Map();
+    
     // If we have pre-filtered tenders, use those directly instead of querying the database
     let tendersToProcess = [];
     
@@ -307,6 +310,18 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
         // Use the pre-filtered tenders provided
         console.log(`Using ${preFilteredTenders.length} pre-filtered tenders for ${tableName}`);
         tendersToProcess = preFilteredTenders;
+        
+        // Still need to check which tenders already exist
+        const sourceIds = tendersToProcess.map(tender => adapter.getSourceId(tender)).filter(id => id);
+        if (sourceIds.length > 0) {
+            const { data: existingTenders } = await supabaseAdmin
+                .from('unified_tenders')
+                .select('source_id, updated_at')
+                .eq('source_table', tableName)
+                .in('source_id', sourceIds);
+            
+            existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
+        }
     } else {
         // Check if table has timestamp fields for incremental processing
         const tableInfo = await supabaseAdmin
@@ -368,7 +383,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             .eq('source_table', tableName)
             .in('source_id', sourceIds);
         
-        const existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
+        existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
         
         // Filter out existing tenders before processing
         tendersToProcess = allTenders.filter(tender => {
