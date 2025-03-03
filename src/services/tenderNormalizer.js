@@ -270,7 +270,7 @@ async function queryLLM(prompt) {
     
     // Set a timeout for the fetch request
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute timeout
+    const timeoutId = setTimeout(() => controller.abort(), 240000); // 4 minute timeout (increased from 2 minutes)
     
     try {
         // Prepare the request to OpenAI API
@@ -301,7 +301,7 @@ async function queryLLM(prompt) {
         return data;
     } catch (error) {
         if (error.name === 'AbortError') {
-            throw new Error('LLM request timed out after 2 minutes');
+            throw new Error('LLM request timed out after 4 minutes');
         }
         throw error;
     } finally {
@@ -1433,6 +1433,82 @@ function fallbackNormalizeTender(tenderData, sourceTable) {
  * @returns {Object} Decision object with needsLLM boolean and reason string
  */
 function evaluateNormalizationNeeds(tender, sourceTable) {
+    // Save initial evaluation to help with debugging
+    const initialEvaluation = { needsLLM: true, reason: 'Default evaluation' };
+    
+    // Always check for critical fields first
+    const criticalFields = ['title', 'description', 'country'];
+    const missingCriticalFields = criticalFields.filter(field => 
+        !tender[field] || tender[field].trim() === ''
+    );
+    
+    if (missingCriticalFields.length > 0) {
+        return { 
+            needsLLM: true, 
+            reason: `Missing critical fields: ${missingCriticalFields.join(', ')}` 
+        };
+    }
+
+    // FAST PATH FOR SPECIFIC SOURCES
+    // These are source-specific optimizations where we know the data structure well
+    
+    // For World Bank tenders
+    if (sourceTable === 'wb') {
+        // Only skip LLM if all critical fields are present and in English
+        if (tender.title && tender.description && tender.country && 
+            isStronglyEnglish(tender.title) && isStronglyEnglish(tender.description)) {
+            return { needsLLM: false, reason: 'World Bank tender with complete English data' };
+        }
+    }
+    
+    // For ADB tenders
+    if (sourceTable === 'adb') {
+        // Only skip LLM if all critical fields are present and in English
+        if (tender.title && tender.description && tender.country && 
+            isStronglyEnglish(tender.title) && isStronglyEnglish(tender.description)) {
+            return { needsLLM: false, reason: 'ADB tender with complete English data' };
+        }
+    }
+    
+    // For AFD tenders
+    if (sourceTable === 'afd_tenders') {
+        // AFD tenders are in French, so we should only skip LLM if we have
+        // both French and English fields already
+        if (tender.title && tender.title_english && 
+            tender.description && tender.description_english &&
+            tender.country) {
+            return { needsLLM: false, reason: 'AFD tender with both French and English data' };
+        }
+    }
+    
+    // For SAM.gov tenders
+    if (sourceTable === 'sam_gov') {
+        // SAM.gov tenders are in English by default, we can skip LLM
+        // but only if all critical fields are present
+        if (tender.title && tender.description && tender.country) {
+            return { needsLLM: false, reason: 'SAM.gov tender with complete data' };
+        }
+    }
+    
+    // For UN tenders
+    if (sourceTable === 'un_tenders') {
+        // UN tenders are typically in English
+        // but only skip if all critical fields are present
+        if (tender.title && tender.description && tender.country && 
+            isStronglyEnglish(tender.title) && isStronglyEnglish(tender.description)) {
+            return { needsLLM: false, reason: 'UN tender with complete English data' };
+        }
+    }
+    
+    // For DGMarket tenders
+    if (sourceTable === 'dgmarket') {
+        // Only skip if we have English data for critical fields
+        if (tender.title && tender.description && tender.country &&
+            isStronglyEnglish(tender.title) && isStronglyEnglish(tender.description)) {
+            return { needsLLM: false, reason: 'DGMarket tender with complete English data' };
+        }
+    }
+    
     // Initialize with default assumption that LLM is needed
     const result = {
         needsLLM: true,
@@ -1587,45 +1663,55 @@ function evaluateNormalizationNeeds(tender, sourceTable) {
 }
 
 /**
- * More comprehensive check for English text
- * @param {string} text - The text to analyze
- * @returns {boolean} Whether the text is strongly identified as English
+ * Determines if text is strongly identified as English
+ * This is a more stringent check than just hasEnglishWords
+ * @param {string} text - The text to evaluate
+ * @returns {boolean} True if the text is strongly identified as English
  */
 function isStronglyEnglish(text) {
-    if (!text || typeof text !== 'string') return false;
-    if (text.length < 20) return false; // Need enough text to analyze
+    if (!text) return false;
     
-    // Enhanced list of common English words
-    const englishWords = [
-        'the', 'and', 'for', 'this', 'that', 'with', 'from', 
-        'have', 'has', 'had', 'not', 'are', 'were', 'was',
-        'will', 'would', 'should', 'could', 'can', 'may',
-        'than', 'then', 'they', 'them', 'their', 'there',
-        'here', 'where', 'when', 'which', 'what', 'who'
+    // Convert to string if not already
+    text = String(text);
+    
+    // Too short to determine
+    if (text.length < 10) return false;
+    
+    // Check for common English words (more extensive list than hasEnglishWords)
+    const commonEnglishWords = [
+        'the', 'and', 'for', 'that', 'this', 'with', 'from', 'have', 'has', 'not',
+        'are', 'were', 'was', 'will', 'would', 'should', 'could', 'been', 'being',
+        'their', 'there', 'they', 'them', 'these', 'those', 'then', 'than', 'such',
+        'some', 'what', 'when', 'where', 'which', 'while', 'about', 'after', 'before',
+        'during', 'under', 'over', 'within', 'through', 'between'
     ];
     
-    const textLower = text.toLowerCase();
+    // Count how many common English words appear in the text
+    const words = text.toLowerCase().match(/\b[a-z]+\b/g) || [];
+    
+    if (words.length < 5) return false; // Too few words to make a determination
+    
     let englishWordCount = 0;
-    let wordCount = 0;
-    
-    // Count total words (approximate)
-    wordCount = textLower.split(/\s+/).length;
-    
-    // Count English words
-    englishWords.forEach(word => {
-        const pattern = new RegExp(`\\b${word}\\b`, 'g');
-        const matches = textLower.match(pattern);
-        if (matches) englishWordCount += matches.length;
-    });
-    
-    // If text has a significant percentage of common English words, it's strongly English
-    // For short texts (< 100 words), require at least 3 matches
-    // For longer texts, require at least 5% of words to be common English words
-    if (wordCount < 100) {
-        return englishWordCount >= 3;
-    } else {
-        return (englishWordCount / wordCount) >= 0.05;
+    for (const word of words) {
+        if (commonEnglishWords.includes(word)) {
+            englishWordCount++;
+        }
     }
+    
+    // Calculate percentage of common English words
+    const englishPercentage = (englishWordCount / words.length) * 100;
+    
+    // Check for non-Latin characters
+    const nonLatinPattern = /[^\x00-\x7F\s]/;
+    const hasNonLatinChars = nonLatinPattern.test(text);
+    
+    // If there are non-Latin characters, be more strict about English classification
+    if (hasNonLatinChars) {
+        return englishPercentage > 15; // Higher threshold for mixed text
+    }
+    
+    // For Latin-only text, use a lower threshold
+    return englishPercentage > 8;
 }
 
 /**
@@ -2031,6 +2117,16 @@ async function normalizeTender(tender, sourceTable) {
     // Save original state for logging
     const originalTender = JSON.parse(JSON.stringify(tender));
     
+    // Check for critical missing fields early and log warnings
+    const criticalFields = ['title', 'description', 'country'];
+    const missingCriticalFields = criticalFields.filter(field => 
+        !tender[field] || (tender[field] && tender[field].trim() === '')
+    );
+    
+    if (missingCriticalFields.length > 0) {
+        console.warn(`⚠️ WARNING: Tender ${tender.id || 'unknown'} from ${sourceTable} is missing critical fields: ${missingCriticalFields.join(', ')}`);
+    }
+    
     // Only log initial state for 1 in 50 tenders to reduce console spam
     tenderProcessingCounter++;
     if (tenderProcessingCounter % 50 === 0) {
@@ -2043,7 +2139,7 @@ async function normalizeTender(tender, sourceTable) {
     }
     
     try {
-        // Skip LLM for certain tenders
+        // Skip LLM for certain tenders - but only if they meet our stricter criteria
         const evaluation = evaluateNormalizationNeeds(tender, sourceTable);
         
         if (!evaluation.needsLLM) {
@@ -2199,9 +2295,9 @@ async function normalizeTender(tender, sourceTable) {
  * @param {string} [method='fallback'] - The normalization method to record
  * @returns {Object} Normalized tender with metadata
  */
-function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
+function fallbackWithMetadata(tender, sourceTable, method = 'fallback', startTime) {
     console.log(`Using ${method} normalization for ${sourceTable}: ${tender.id || 'unknown'}`);
-    const startTime = performance.now();
+    const startTimeLocal = startTime || performance.now();
     
     // Save original state for logging
     const originalTender = JSON.parse(JSON.stringify(tender));
@@ -2223,6 +2319,26 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
             performanceStats.fallbackNormalization++;
             result.normalized_method = method;
         }
+        
+        // CRITICAL FIELD CHECK: Ensure title, description, and country are never null
+        if (!result.title || result.title.trim() === '') {
+            console.warn(`Critical field missing: title is null or empty for ${sourceTable}:${tender.id || 'unknown'}. Using fallback title.`);
+            // Create a fallback title from available data
+            result.title = generateFallbackTitle(result, sourceTable);
+        }
+        
+        if (!result.description || result.description.trim() === '') {
+            console.warn(`Critical field missing: description is null or empty for ${sourceTable}:${tender.id || 'unknown'}. Using fallback description.`);
+            // Create a fallback description from available data
+            result.description = generateFallbackDescription(result, sourceTable);
+        }
+        
+        if (!result.country || result.country.trim() === '') {
+            console.warn(`Critical field missing: country is null or empty for ${sourceTable}:${tender.id || 'unknown'}. Attempting to determine country.`);
+            // Try to determine country from available data
+            result.country = determineCountryFromSource(result, sourceTable) || 'Unknown';
+        }
+        
     } catch (error) {
         console.error(`Error in fallback normalization for ${sourceTable}:`, error);
         // Create a minimal normalized object with error information
@@ -2236,7 +2352,7 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
     }
     
     const endTime = performance.now();
-    const processingTime = (endTime - startTime) / 1000; // Convert to seconds
+    const processingTime = (endTime - startTimeLocal) / 1000; // Convert to seconds
     
     console.log(`${method === 'rule-based-fast' ? 'Fast' : 'Fallback'} normalization completed in ${processingTime.toFixed(3)} seconds`);
     
@@ -2342,6 +2458,144 @@ For document_links, each item should have the structure: {"title": "Document tit
     prompt += `\nRaw tender data:\n${JSON.stringify(tender, null, 2)}`;
     
     return prompt;
+}
+
+/**
+ * Generate a fallback title when the original is missing
+ * @param {Object} tender - The tender data
+ * @param {string} sourceTable - The source table name
+ * @returns {string} A fallback title
+ */
+function generateFallbackTitle(tender, sourceTable) {
+    // Try to create a title from various fields
+    if (tender.project_name) {
+        return `Tender for ${tender.project_name}`;
+    }
+    
+    if (tender.tender_type && tender.sector) {
+        return `${tender.tender_type} - ${tender.sector}`;
+    }
+    
+    if (tender.procurement_method && tender.organization_name) {
+        return `${tender.procurement_method} from ${tender.organization_name}`;
+    }
+    
+    if (tender.reference_number) {
+        return `Tender Reference: ${tender.reference_number}`;
+    }
+    
+    // Last resort - create a generic title
+    return `Untitled Tender from ${sourceTable} (ID: ${tender.id || tender.notice_id || 'Unknown'})`;
+}
+
+/**
+ * Generate a fallback description when the original is missing
+ * @param {Object} tender - The tender data
+ * @param {string} sourceTable - The source table name
+ * @returns {string} A fallback description
+ */
+function generateFallbackDescription(tender, sourceTable) {
+    let description = [];
+    
+    // Add title if available
+    if (tender.title) {
+        description.push(`Title: ${tender.title}`);
+    }
+    
+    // Add project information if available
+    if (tender.project_name) {
+        description.push(`Project: ${tender.project_name}`);
+    }
+    
+    // Add organization information if available
+    if (tender.organization_name) {
+        description.push(`Organization: ${tender.organization_name}`);
+    }
+    
+    // Add sector information if available
+    if (tender.sector) {
+        description.push(`Sector: ${tender.sector}`);
+    }
+    
+    // Add dates if available
+    if (tender.publication_date) {
+        description.push(`Published: ${tender.publication_date}`);
+    }
+    
+    if (tender.deadline_date) {
+        description.push(`Deadline: ${tender.deadline_date}`);
+    }
+    
+    // Add value if available
+    if (tender.estimated_value) {
+        const currency = tender.currency || '';
+        description.push(`Estimated Value: ${currency} ${tender.estimated_value}`);
+    }
+    
+    // If we have at least some information, join it together
+    if (description.length > 0) {
+        return description.join('. ');
+    }
+    
+    // Last resort - create a generic description
+    return `Tender from ${sourceTable}. ID: ${tender.id || tender.notice_id || 'Unknown'}. No further details available.`;
+}
+
+/**
+ * Determine the country from source table or other tender data
+ * @param {Object} tender - The tender data
+ * @param {string} sourceTable - The source table name
+ * @returns {string|null} The determined country or null if can't determine
+ */
+function determineCountryFromSource(tender, sourceTable) {
+    // Check if we can determine country from the source table
+    switch (sourceTable) {
+        case 'sam_gov':
+            return 'United States';
+        case 'ted_tenders':
+            return 'European Union';
+        case 'dgmarket':
+            // Check for region or country in other fields
+            if (tender.region) {
+                return tender.region;
+            }
+            break;
+        case 'un_tenders':
+            return 'United Nations';
+        case 'wb':
+            // World Bank operates globally, but try to extract from project info
+            if (tender.project_name && tender.project_name.includes(' in ')) {
+                const parts = tender.project_name.split(' in ');
+                if (parts.length > 1) {
+                    return parts[1].trim().split(' ')[0]; // Get first word after " in "
+                }
+            }
+            break;
+        case 'adb':
+            // For Asian Development Bank, try to determine from project info
+            if (tender.region) {
+                return tender.region;
+            }
+            if (tender.project_name && tender.project_name.includes(' in ')) {
+                const parts = tender.project_name.split(' in ');
+                if (parts.length > 1) {
+                    return parts[1].trim().split(' ')[0]; // Get first word after " in "
+                }
+            }
+            return 'Asia';
+        case 'afd_tenders':
+            return 'France';
+        case 'iadb':
+            return 'Latin America';
+    }
+    
+    // If we have a location or city field, try to use that
+    if (tender.location) {
+        return tender.location.split(',')[0].trim();
+    }
+    
+    // If all else fails
+    return null;
 }
 
 module.exports = {
