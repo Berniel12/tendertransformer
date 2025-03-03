@@ -4,7 +4,6 @@
  */
 
 // Import required dependencies
-const { v4: uuidv4 } = require('uuid');
 const sourceRegistry = require('../sources/sourceRegistry');
 const { normalizeTender, evaluateNormalizationNeeds } = require('./tenderNormalizer');
 
