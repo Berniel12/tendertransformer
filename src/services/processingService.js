@@ -1007,10 +1007,23 @@ function promiseWithTimeout(promise, timeoutMs, errorMessage) {
  * Process all unprocessed tenders from all sources using pagination
  * This function will process every tender in the database that hasn't been processed yet
  * @param {Object} supabaseAdmin - Supabase admin client
+ * @param {Object} options - Processing options
+ * @param {boolean} options.filterUnprocessedOnly - Set to false to process ALL tenders regardless of last_processed_at
+ * @param {number} options.batchSize - Default batch size
+ * @param {number} options.maxTendersPerSource - Maximum tenders to process per source (0 means no limit)
  * @returns {Promise<Object>} Processing results
  */
-async function processAllUnprocessedTenders(supabaseAdmin) {
-    console.log('Starting to process ALL unprocessed tenders from all sources');
+async function processAllUnprocessedTenders(supabaseAdmin, options = {}) {
+    console.log('Starting to process ALL tenders from all sources');
+    
+    // Options with defaults
+    const { 
+        filterUnprocessedOnly = false, // Set to false to process ALL tenders regardless of last_processed_at
+        batchSize = 1000,              // Default batch size
+        maxTendersPerSource = 0        // 0 means no limit
+    } = options;
+    
+    console.log(`Processing options: filterUnprocessedOnly=${filterUnprocessedOnly}, batchSize=${batchSize}, maxTendersPerSource=${maxTendersPerSource || 'unlimited'}`);
     
     // Get all available source adapters
     const sources = sourceRegistry.getRegisteredSources();
@@ -1063,7 +1076,7 @@ async function processAllUnprocessedTenders(supabaseAdmin) {
             console.log(`Found timestamp fields for table ${sourceTable}:`, timestampFields);
             
             // Pagination settings
-            const pageSize = 1000; // Supabase default page size
+            const pageSize = batchSize;
             let processedCount = 0;
             let moreToProcess = true;
             let page = 0;
@@ -1077,7 +1090,7 @@ async function processAllUnprocessedTenders(supabaseAdmin) {
             }
             
             // Process all tenders in pages
-            while (moreToProcess) {
+            while (moreToProcess && (maxTendersPerSource <= 0 || processedCount < maxTendersPerSource)) {
                 console.log(`Processing page ${page + 1} (tenders ${page * pageSize} to ${(page + 1) * pageSize - 1}) from ${sourceTable}`);
                 
                 // Build query for this page
@@ -1092,9 +1105,12 @@ async function processAllUnprocessedTenders(supabaseAdmin) {
                     queryBatch = queryBatch.order('updated_at', { ascending: false });
                 }
                 
-                // Filter for unprocessed tenders only
-                if (timestampFields.includes('last_processed_at')) {
+                // Filter for unprocessed tenders only if option is enabled
+                if (filterUnprocessedOnly && timestampFields.includes('last_processed_at')) {
                     queryBatch = queryBatch.is('last_processed_at', null);
+                    console.log(`Filtering for unprocessed tenders only (where last_processed_at is null)`);
+                } else {
+                    console.log(`Processing ALL tenders regardless of last_processed_at status`);
                 }
                 
                 // Get tenders for this page
@@ -1107,12 +1123,12 @@ async function processAllUnprocessedTenders(supabaseAdmin) {
                 }
                 
                 if (!pageTenders || pageTenders.length === 0) {
-                    console.log(`No more unprocessed tenders found in ${sourceTable}`);
+                    console.log(`No more tenders found in ${sourceTable}`);
                     moreToProcess = false;
                     break;
                 }
                 
-                console.log(`Found ${pageTenders.length} unprocessed tenders in page ${page + 1} from ${sourceTable}`);
+                console.log(`Found ${pageTenders.length} tenders in page ${page + 1} from ${sourceTable}`);
                 
                 // Pre-check which tenders already exist
                 const sourceIds = pageTenders.map(tender => adapter.getSourceId(tender)).filter(id => id);

@@ -163,7 +163,14 @@ async function processAllUnprocessed() {
     console.log('Processing ALL unprocessed tenders from all sources using pagination');
     
     try {
-        const results = await processAllUnprocessedTenders(supabaseAdmin);
+        // Process all tenders regardless of last_processed_at status
+        const options = {
+            filterUnprocessedOnly: false, // Process ALL tenders, not just unprocessed ones
+            batchSize: 1000,              // Process in batches of 1000
+            maxTendersPerSource: 0        // No limit per source (process all)
+        };
+        
+        const results = await processAllUnprocessedTenders(supabaseAdmin, options);
         
         console.log('\n=== Final Processing Summary ===');
         console.log(`Total tenders processed: ${results.processed}`);
