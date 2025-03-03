@@ -510,6 +510,16 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     console.log = (message, ...args) => {
                         if (typeof message === 'string') {
+                            // Special handling for ADB tenders - ensure consistent messaging
+                            if (tableName === 'adb' && CONFIG.useAdbFastNormalization && message.includes('fallback normalization')) {
+                                // Replace the fallback message with the fast normalization message
+                                originalConsoleLog(`Using fast normalization for tender: ADB tenders using optimized fast path (configured for performance)`);
+                                methodUsed = "Fast";
+                                // Still capture the original message
+                                capturedLogs.push(message);
+                                return;
+                            }
+                            
                             capturedLogs.push(message);
                             
                             // Only allow specific messages to be logged during processing
@@ -517,6 +527,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                                 fallbackUsed = true;
                                 methodUsed = "Fallback";
                             }
+                            
+                            // Let console logs pass through to the terminal
+                            originalConsoleLog(message, ...args);
+                        } else {
+                            originalConsoleLog(message, ...args);
                         }
                     };
                     

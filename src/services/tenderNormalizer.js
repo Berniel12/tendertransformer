@@ -1307,11 +1307,19 @@ function fallbackWithMetadata(tender, sourceTable, reason, startTime) {
     const normalizedData = fallbackNormalizeTender(tender, sourceTable);
     
     const endTime = Date.now();
-    console.log(`Fallback normalization completed in ${(endTime - startTime) / 1000} seconds`);
+    
+    // For ADB tenders, use different logging to indicate this is a fast path, not a fallback
+    if (sourceTable === 'adb') {
+        console.log(`Fast normalization completed in ${(endTime - startTime) / 1000} seconds`);
+        // Set the method to fast normalization for clarity
+        normalizedData.normalized_method = 'rule-based-fast';
+    } else {
+        console.log(`Fallback normalization completed in ${(endTime - startTime) / 1000} seconds`);
+        normalizedData.normalized_method = 'rule-based-fallback';
+    }
     
     // Add metadata
     normalizedData.normalized_at = new Date().toISOString();
-    normalizedData.normalized_method = 'rule-based-fallback';
     normalizedData.fallback_reason = reason;
     normalizedData.source_table = sourceTable;
     normalizedData.processing_time_ms = endTime - startTime;
