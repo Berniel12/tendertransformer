@@ -385,29 +385,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     // Track performance statistics
                     trackPerformance(tableName, normalizedTender, processingTime);
                     
-                    // Log normalization completion once
-                    if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
-                        fastNormalizationCount++;
-                    } else if (normalizedTender.normalized_method === 'llm') {
-                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
-                    } else {
-                        console.log(`Using fallback normalization for ${tableName}`);
-                        fallbackCount++;
-                    }
-                    
-                    if (normalizedTender.status === 'error') {
-                        console.error(`Error normalizing tender: ${normalizedTender.description}`);
-                        errorCount++;
-                        return { success: false, error: normalizedTender.description };
-                    }
-                    
                     // Clean up fields and ensure schema compatibility
                     const schemaFields = {
                         estimated_value: true,
-                        contract_value: true,
-                        award_value: true, // Using award_value instead of award_amount
-                        potential_value: true // Using potential_value instead of potential_award_amount
+                        award_value: true,
+                        potential_value: true
                     };
                     
                     // Clean up fields
@@ -415,7 +397,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         const value = normalizedTender[key];
                         if (value === '') {
                             normalizedTender[key] = null;
-                        } else if (schemaFields[key] || key.includes('value') || key.includes('amount')) {
+                        } else if (schemaFields[key] || key.includes('value')) {
                             try {
                                 // Always convert numeric fields using extractNumericValue
                                 const numericValue = extractNumericValue(value);
@@ -430,14 +412,26 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         }
                     });
                     
-                    // Ensure schema compatibility
-                    if ('award_amount' in normalizedTender) {
-                        normalizedTender.award_value = normalizedTender.award_amount;
-                        delete normalizedTender.award_amount;
+                    // Remove any fields not in schema
+                    if ('contract_value' in normalizedTender) {
+                        delete normalizedTender.contract_value;
                     }
-                    if ('potential_award_amount' in normalizedTender) {
-                        normalizedTender.potential_value = normalizedTender.potential_award_amount;
-                        delete normalizedTender.potential_award_amount;
+                    
+                    // Log normalization completion once
+                    if (normalizedTender.normalized_method === 'rule-based-fast') {
+                        console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
+                        fastNormalizationCount++;
+                    } else if (normalizedTender.normalized_method === 'llm') {
+                        console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
+                    } else {
+                        console.log(`Fallback normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
+                        fallbackCount++;
+                    }
+                    
+                    if (normalizedTender.status === 'error') {
+                        console.error(`Error normalizing tender: ${normalizedTender.description}`);
+                        errorCount++;
+                        return { success: false, error: normalizedTender.description };
                     }
                     
                     normalizedTender.source_table = tableName;
