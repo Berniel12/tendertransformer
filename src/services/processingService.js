@@ -388,37 +388,37 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         normalizationReason = "English tender with standard fields suitable for fast normalization";
                     }
                     
-                    // Log what kind of normalization we're using
-                    if (useFastNormalization) {
-                        console.log(`Using fast normalization for tender: ${normalizationReason}`);
-                    } else {
-                        console.log(`Using LLM normalization for tender: Complex content requiring advanced processing`);
-                    }
-                    
-                    if (adapter.name) {
-                        console.log(`Using dedicated handler for ${tableName}`);
-                    }
-                    
-                    // Use the adapter to process the tender with controlled logging
-                    const startTime = Date.now();
-                    
-                    // Temporarily override console.log to control adapter internal logging
+                    // Capture all console.log calls during normalization to control messaging
                     const originalConsoleLog = console.log;
+                    const capturedLogs = [];
+                    let methodUsed = useFastNormalization ? "Fast" : "LLM";
                     let fallbackUsed = false;
                     
                     console.log = (message, ...args) => {
-                        // Only capture fallback message and suppress other internal logs
-                        if (typeof message === 'string' && message.includes('fallback normalization')) {
-                            fallbackUsed = true;
-                            originalConsoleLog(`Using fallback normalization for ${tableName} due to LLM unavailability`);
+                        if (typeof message === 'string') {
+                            capturedLogs.push(message);
+                            
+                            // Only allow specific messages to be logged during processing
+                            if (message.includes('fallback normalization')) {
+                                fallbackUsed = true;
+                                methodUsed = "Fallback";
+                                originalConsoleLog(`Using fallback normalization for ${tableName} due to LLM unavailability`);
+                            }
                         }
                     };
                     
-                    // Process the tender and restore logging
+                    // Log the intent
+                    if (methodUsed === "Fast") {
+                        originalConsoleLog(`Using fast normalization for tender: ${normalizationReason}`);
+                    }
+                    
+                    // Use the adapter to process the tender
+                    const startTime = Date.now();
                     let normalizedTender;
                     try {
                         normalizedTender = await adapter.processTender(tender, normalizeTender, useFastNormalization);
                     } finally {
+                        // Restore original console
                         console.log = originalConsoleLog;
                     }
                     
@@ -453,19 +453,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         delete normalizedTender.contract_value;
                     }
                     
-                    // Log normalization completion with timing and proper method name
-                    let methodName;
-                    if (fallbackUsed) {
-                        methodName = 'Fallback';
-                    } else if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        methodName = 'Fast';
-                    } else if (normalizedTender.normalized_method === 'llm') {
-                        methodName = 'LLM';
-                    } else {
-                        methodName = normalizedTender.normalized_method || 'Unknown';
-                    }
-                    
-                    console.log(`${methodName} normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
+                    // Log normalization completion with timing based on the actual method used
+                    console.log(`${methodUsed} normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                     
                     if (normalizedTender.status === 'error') {
                         console.error(`Error normalizing tender: ${normalizedTender.description}`);
