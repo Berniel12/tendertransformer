@@ -422,7 +422,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Now we know which method was actually used, so log it clearly
                     if (fallbackUsed) {
-                        console.log(`Using fallback normalization for ${tableName} due to LLM unavailability`);
+                        if (tableName === 'sam_gov') {
+                            console.log(`Using fallback normalization for ${tableName} (normally would use fast normalization)`);
+                        } else {
+                            console.log(`Using fallback normalization for ${tableName} due to LLM unavailability`);
+                        }
                     } else if (methodUsed === "Fast") {
                         console.log(`Using fast normalization for tender: ${normalizationReason}`);
                     } else {
