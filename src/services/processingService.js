@@ -475,7 +475,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Evaluate normalization needs first
                     console.log(`Evaluating normalization needs for tender from ${tableName}`);
-                    const normalizationNeeds = await evaluateNormalizationNeeds(tender);
+                    const normalizationNeeds = await evaluateNormalizationNeeds(tender, tableName);
                     
                     // Determine normalization method
                     const useFastNormalization = shouldUseFastNormalization(tableName, normalizationNeeds);

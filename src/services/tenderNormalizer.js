@@ -637,6 +637,13 @@ function evaluateNormalizationNeeds(tender, sourceTable) {
         reason: "Default processing path"
     };
 
+    // Fast path for World Bank tenders - immediately return without further checks
+    if (sourceTable === "wb") {
+        result.needsLLM = false;
+        result.reason = "World Bank tenders use fast normalization for performance";
+        return result;
+    }
+
     // 1. Source-based rules - expand to cover more sources
     if (sourceTable === "sam_gov") {
         // SAM.gov tenders are in English and well-structured
