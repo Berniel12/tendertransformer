@@ -643,6 +643,13 @@ function evaluateNormalizationNeeds(tender, sourceTable) {
         result.reason = "World Bank tenders use fast normalization for performance";
         return result;
     }
+    
+    // Fast path for ADB tenders - immediately return without further checks
+    if (sourceTable === "adb") {
+        result.needsLLM = false;
+        result.reason = "ADB tenders use fast normalization to prevent timeouts";
+        return result;
+    }
 
     // 1. Source-based rules - expand to cover more sources
     if (sourceTable === "sam_gov") {
@@ -866,7 +873,8 @@ function fastNormalizeTender(tender, sourceTable) {
     if (sourceTable === 'sam_gov' || 
         sourceTable === 'ted' ||
         sourceTable === 'iadb' ||
-        sourceTable === 'un_procurement') {
+        sourceTable === 'un_procurement' ||
+        sourceTable === 'adb') {
         console.log(`Using dedicated handler for ${sourceTable}`);
         const normalizedData = fallbackNormalizeTender(tender, sourceTable);
         normalizedData.normalized_method = 'rule-based-fast'; // Override the method name
