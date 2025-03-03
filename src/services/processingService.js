@@ -402,15 +402,11 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                             if (message.includes('fallback normalization')) {
                                 fallbackUsed = true;
                                 methodUsed = "Fallback";
-                                originalConsoleLog(`Using fallback normalization for ${tableName} due to LLM unavailability`);
                             }
                         }
                     };
                     
-                    // Log the intent
-                    if (methodUsed === "Fast") {
-                        originalConsoleLog(`Using fast normalization for tender: ${normalizationReason}`);
-                    }
+                    // Do not log the intent here to avoid conflicts with the actual method used
                     
                     // Use the adapter to process the tender
                     const startTime = Date.now();
@@ -423,6 +419,15 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     }
                     
                     const processingTime = Date.now() - startTime;
+                    
+                    // Now we know which method was actually used, so log it clearly
+                    if (fallbackUsed) {
+                        console.log(`Using fallback normalization for ${tableName} due to LLM unavailability`);
+                    } else if (methodUsed === "Fast") {
+                        console.log(`Using fast normalization for tender: ${normalizationReason}`);
+                    } else {
+                        console.log(`Using LLM normalization for tender from ${tableName}`);
+                    }
                     
                     // Track performance statistics
                     trackPerformance(tableName, normalizedTender, processingTime);
