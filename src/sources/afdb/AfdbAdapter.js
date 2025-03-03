@@ -18,14 +18,63 @@ class AfdbAdapter extends BaseSourceAdapter {
   }
   
   /**
+   * Safely parse a date string to YYYY-MM-DD format
+   * Returns null if date is invalid
+   */
+  safeParseDate(dateStr) {
+    if (!dateStr) return null;
+    
+    try {
+      // First try parsing as ISO date
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) {
+        // If invalid, try other common formats
+        const formats = [
+          // DD/MM/YYYY
+          /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/,
+          // DD-MM-YYYY
+          /^(\d{1,2})-(\d{1,2})-(\d{4})$/,
+          // YYYY/MM/DD
+          /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/,
+          // YYYY-MM-DD
+          /^(\d{4})-(\d{1,2})-(\d{1,2})$/
+        ];
+
+        for (const format of formats) {
+          const match = dateStr.match(format);
+          if (match) {
+            const [_, first, second, third] = match;
+            // Check if year is first or last based on format
+            const isYearFirst = first.length === 4;
+            const year = isYearFirst ? first : third;
+            const month = isYearFirst ? second : first;
+            const day = isYearFirst ? third : second;
+            
+            // Create date object and validate
+            const parsedDate = new Date(year, month - 1, day);
+            if (!isNaN(parsedDate.getTime())) {
+              return parsedDate.toISOString().split('T')[0];
+            }
+          }
+        }
+        return null;
+      }
+      return date.toISOString().split('T')[0];
+    } catch (e) {
+      console.warn(`Failed to parse date: ${dateStr}`, e);
+      return null;
+    }
+  }
+  
+  /**
    * Map AfDB fields to standardized fields
    */
   mapFields(tender) {
     return {
       title: tender.title || tender.tender_title,
       description: tender.description || tender.tender_description,
-      publication_date: tender.publication_date ? new Date(tender.publication_date).toISOString().split('T')[0] : null,
-      deadline_date: tender.deadline_date || tender.closing_date ? new Date(tender.deadline_date || tender.closing_date).toISOString().split('T')[0] : null,
+      publication_date: this.safeParseDate(tender.publication_date),
+      deadline_date: this.safeParseDate(tender.deadline_date || tender.closing_date),
       notice_id: tender.tender_id?.toString() || tender.reference_number?.toString(),
       reference_number: tender.reference_number || tender.tender_id,
       organization_id: tender.borrower || tender.organization || tender.agency,
