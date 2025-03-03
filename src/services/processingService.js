@@ -340,16 +340,12 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     // Use fast normalization for English tenders or minimal content
                     let shouldUseFastNormalization = false;
                     if (tableName === 'sam_gov') {
-                        console.log(`Using fast normalization for tender: SAM.gov tenders use dedicated handler`);
                         shouldUseFastNormalization = true;
                     } else if (normalizationNeeds.language === 'en' && !normalizationNeeds.complexFields) {
-                        console.log(`Using fast normalization for tender: English tender with simple fields`);
                         shouldUseFastNormalization = true;
                     } else if (normalizationNeeds.minimalContent) {
-                        console.log(`Using fast normalization for tender: Tender content is minimal`);
                         shouldUseFastNormalization = true;
                     } else if (!normalizationNeeds.needsTranslation && !normalizationNeeds.complexFields) {
-                        console.log(`Using fast normalization for tender: Simple tender with no translation needed`);
                         shouldUseFastNormalization = true;
                     }
                     
@@ -378,29 +374,27 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         return { success: false, error: normalizedTender.description };
                     }
                     
+                    // Clean up fields and ensure schema compatibility
+                    const schemaFields = {
+                        estimated_value: true,
+                        contract_value: true,
+                        award_value: true, // Using award_value instead of award_amount
+                        potential_value: true // Using potential_value instead of potential_award_amount
+                    };
+                    
                     // Clean up fields
                     Object.keys(normalizedTender).forEach(key => {
                         const value = normalizedTender[key];
                         if (value === '') {
                             normalizedTender[key] = null;
-                        } else if (
-                            key === 'estimated_value' || 
-                            key === 'contract_value' || 
-                            key === 'award_amount' ||
-                            key === 'potential_award_amount' ||
-                            key.includes('amount') || 
-                            key.includes('value')
-                        ) {
+                        } else if (schemaFields[key] || key.includes('value') || key.includes('amount')) {
                             try {
                                 // Always convert numeric fields using extractNumericValue
                                 const numericValue = extractNumericValue(value);
-                                if (numericValue === null) {
+                                if (numericValue === null && value !== null && value !== undefined) {
                                     console.warn(`Could not extract numeric value for ${key} from: ${value}, setting to null`);
-                                    normalizedTender[key] = null;
-                                } else {
-                                    console.log(`Successfully extracted numeric value for ${key}: ${numericValue} from ${value}`);
-                                    normalizedTender[key] = numericValue;
                                 }
+                                normalizedTender[key] = numericValue;
                             } catch (error) {
                                 console.warn(`Error processing numeric value for ${key}: ${error.message}`);
                                 normalizedTender[key] = null;
@@ -408,18 +402,15 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         }
                     });
                     
-                    // Double-check numeric fields before insertion
-                    ['estimated_value', 'contract_value', 'award_amount', 'potential_award_amount'].forEach(key => {
-                        if (normalizedTender[key] !== null && typeof normalizedTender[key] !== 'number') {
-                            console.warn(`Found non-numeric value in ${key}: ${normalizedTender[key]}, attempting to clean...`);
-                            try {
-                                normalizedTender[key] = extractNumericValue(normalizedTender[key]);
-                            } catch (error) {
-                                console.warn(`Failed to clean ${key}, setting to null`);
-                                normalizedTender[key] = null;
-                            }
-                        }
-                    });
+                    // Ensure schema compatibility
+                    if ('award_amount' in normalizedTender) {
+                        normalizedTender.award_value = normalizedTender.award_amount;
+                        delete normalizedTender.award_amount;
+                    }
+                    if ('potential_award_amount' in normalizedTender) {
+                        normalizedTender.potential_value = normalizedTender.potential_award_amount;
+                        delete normalizedTender.potential_award_amount;
+                    }
                     
                     normalizedTender.source_table = tableName;
                     normalizedTender.source_id = sourceId;
