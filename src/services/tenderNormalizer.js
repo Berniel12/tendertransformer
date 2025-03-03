@@ -282,7 +282,11 @@ function enhanceTenderTitles(normalizedData) {
         /^FORECAST\s*[IVX]*\s*-+\s*/i,   // FORECAST II -
         /^[LR]\s*-+\s*/i,                // L -- or R --
         /^\d+\s*-+\s*/i,                 // 66 --
-        /^[A-Z]{1,3}\s*-+\s*/i           // Other letter prefixes like "A --"
+        /^[A-Z]{1,3}\s*-+\s*/i,          // Other letter prefixes like "A --"
+        /^REF[\s.:-]+/i,                 // REF: or REF. or REF -
+        /^RFP[\s.:-]+/i,                 // RFP: or RFP. or RFP -
+        /^ITB[\s.:-]+/i,                 // ITB: or ITB. or ITB -
+        /^NO[\s.:-]+\d+/i                // NO. 12345 or NO: 12345
     ];
     
     for (const pattern of prefixPatterns) {
@@ -297,8 +301,77 @@ function enhanceTenderTitles(normalizedData) {
     if (titleEnglish) {
         titleEnglish = titleEnglish.replace(/\s*\([A-Z]{2,5}\)\s*$/i, '');
     }
+
+    // 3. Move reference numbers to the end of the title
+    const refNumberPatterns = [
+        /\b([A-Z]{2,4}-\d{2,}-\d{2,})\b/g,     // Format like "ICB-20-12345"
+        /\b(\d{5,})\b/g,                        // Random long numbers
+        /\b([A-Z]{2,}\d{4,})\b/g                // Format like "ABC12345"
+    ];
     
-    // 3. Truncate extremely long titles (over 150 chars) with ellipsis but preserve meaning
+    let refNumbers = [];
+    
+    for (const pattern of refNumberPatterns) {
+        const matches = [...title.matchAll(pattern)];
+        if (matches.length > 0) {
+            refNumbers = [...refNumbers, ...matches.map(m => m[0])];
+            title = title.replace(pattern, ' ');
+        }
+    }
+    
+    // 4. Fix ALL CAPS titles
+    if (title === title.toUpperCase() && title.length > 10) {
+        // Convert to Title Case (capitalize first letter of each word)
+        title = title.toLowerCase().replace(/\b\w+/g, word => {
+            // Skip short conjunctions, articles, and prepositions unless they're the first word
+            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of'];
+            return minorWords.includes(word) ? word : word.charAt(0).toUpperCase() + word.slice(1);
+        });
+        
+        // Ensure first word is always capitalized
+        title = title.charAt(0).toUpperCase() + title.slice(1);
+    }
+    
+    if (titleEnglish === titleEnglish.toUpperCase() && titleEnglish.length > 10) {
+        titleEnglish = titleEnglish.toLowerCase().replace(/\b\w+/g, word => {
+            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of'];
+            return minorWords.includes(word) ? word : word.charAt(0).toUpperCase() + word.slice(1);
+        });
+        titleEnglish = titleEnglish.charAt(0).toUpperCase() + titleEnglish.slice(1);
+    }
+    
+    // 5. Expand common acronyms
+    const acronymMap = {
+        'ICB': 'International Competitive Bidding for',
+        'NCB': 'National Competitive Bidding for',
+        'ICT': 'Information and Communication Technology',
+        'IT': 'Information Technology',
+        'RFP': 'Request for Proposal:',
+        'EOI': 'Expression of Interest:',
+        'HVAC': 'Heating, Ventilation, and Air Conditioning',
+        'PPE': 'Personal Protective Equipment',
+        'O&M': 'Operation and Maintenance',
+        'M&E': 'Monitoring and Evaluation'
+    };
+    
+    // Replace standalone acronyms (surrounded by spaces or at start/end)
+    for (const [acronym, expansion] of Object.entries(acronymMap)) {
+        const pattern = new RegExp(`\\b${acronym}\\b`, 'g');
+        if (pattern.test(title)) {
+            title = title.replace(pattern, expansion);
+        }
+        if (titleEnglish && pattern.test(titleEnglish)) {
+            titleEnglish = titleEnglish.replace(pattern, expansion);
+        }
+    }
+    
+    // 6. Clean up excessive spacing
+    title = title.replace(/\s+/g, ' ').trim();
+    if (titleEnglish) {
+        titleEnglish = titleEnglish.replace(/\s+/g, ' ').trim();
+    }
+    
+    // 7. Truncate extremely long titles (over 150 chars) with ellipsis but preserve meaning
     if (title.length > 150) {
         // Split by common separators and keep first meaningful part
         const parts = title.split(/\s[-–—:]\s|\s*\|\s*|\s*;\s*/);
@@ -318,13 +391,21 @@ function enhanceTenderTitles(normalizedData) {
         }
     }
     
-    // 4. Capitalize first letter if entire title is lowercase
+    // 8. Capitalize first letter if entire title is lowercase
     if (/^[a-z]/.test(title)) {
         title = title.charAt(0).toUpperCase() + title.slice(1);
     }
     
     if (titleEnglish && /^[a-z]/.test(titleEnglish)) {
         titleEnglish = titleEnglish.charAt(0).toUpperCase() + titleEnglish.slice(1);
+    }
+    
+    // 9. Add reference numbers back at the end if found
+    if (refNumbers.length > 0) {
+        title = title + ` (Ref: ${refNumbers.join(', ')})`;
+        if (titleEnglish) {
+            titleEnglish = titleEnglish + ` (Ref: ${refNumbers.join(', ')})`;
+        }
     }
     
     // Update the normalized data
@@ -888,7 +969,7 @@ async function fastNormalizeTender(tenderData, sourceTable) {
     
     if (dedicatedSources.includes(sourceTable)) {
         console.log(`Using dedicated handler for ${sourceTable}`);
-        return fallbackNormalizeTender(tenderData, sourceTable, 'rule-based-fast');
+        return fallbackNormalizeTender(tenderData, sourceTable);
     }
     
     // Generic handling for other sources
