@@ -1354,7 +1354,9 @@ function fallbackNormalizeTender(tenderData, sourceTable) {
     // Handle source-specific formatting
     switch (sourceTable) {
         case 'sam_gov':
-            // For SAM.gov tenders, add specific handling
+            // For SAM.gov tenders, ALWAYS set country to UNITED STATES
+            normalizedTender.country = 'UNITED STATES';
+            
             if (tenderData.original_data) {
                 // Extract organization name if needed
                 if (!normalizedTender.organization_name && tenderData.original_data.org_key) {
@@ -1382,9 +1384,6 @@ function fallbackNormalizeTender(tenderData, sourceTable) {
                 if (!normalizedTender.reference_number && tenderData.original_data.solicitation_number) {
                     normalizedTender.reference_number = tenderData.original_data.solicitation_number;
                 }
-                
-                // Set country as UNITED STATES if it's a SAM.gov tender
-                normalizedTender.country = normalizedTender.country || 'UNITED STATES';
             }
             break;
             
@@ -2104,6 +2103,25 @@ function enhanceExtractedFields(tender) {
     return enhanceTenderTitles(tender);
 }
 
+// Global flag to track schema compatibility
+let qualityFieldsAvailable = true;
+
+/**
+ * Safely prepare a tender for database insertion by removing fields that might not exist in schema
+ * @param {Object} tender - The tender data with quality fields
+ * @returns {Object} Tender data safe for database insertion
+ */
+function prepareForDatabaseInsertion(tender) {
+    // If we've already encountered an error with quality fields, remove them
+    if (!qualityFieldsAvailable) {
+        const { quality_score, quality_validated, has_validation_issues, ...safeTender } = tender;
+        return safeTender;
+    }
+    
+    // Otherwise return the full tender (will be caught and handled if schema issues arise)
+    return tender;
+}
+
 /**
  * Enhanced normalizeTender function with selective LLM usage
  * @param {Object} tender - The tender data to normalize
@@ -2164,6 +2182,9 @@ async function normalizeTender(tender, sourceTable) {
             normalizedData.quality_validated = true;
             normalizedData.has_validation_issues = !validationResult.isValid || validationResult.minorIssues.length > 0;
             
+            // Prepare for database insertion (remove quality fields if needed)
+            const databaseReadyTender = prepareForDatabaseInsertion(normalizedData);
+            
             // For final results logging, also reduce frequency and simplify
             if (tenderProcessingCounter % 50 === 0) {
                 // Get the result from whatever normalization path was used
@@ -2201,7 +2222,7 @@ async function normalizeTender(tender, sourceTable) {
                 });
             }
             
-            return normalizedData;
+            return databaseReadyTender;
         }
         
         console.log(`Using LLM normalization for tender: ${evaluation.reason}`);
@@ -2390,6 +2411,9 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback', startTim
     result.quality_validated = true;
     result.has_validation_issues = !validationResult.isValid || validationResult.minorIssues.length > 0;
     
+    // Prepare for database insertion (remove quality fields if needed)
+    const databaseReadyTender = prepareForDatabaseInsertion(result);
+    
     // Only log the full comparison for 1 in 50 tenders to reduce spam
     if (tenderProcessingCounter % 50 === 0) {
         // Compare original to final state
@@ -2415,7 +2439,7 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback', startTim
         });
     }
     
-    return result;
+    return databaseReadyTender;
 }
 
 /**
@@ -2490,6 +2514,42 @@ function generateFallbackTitle(tender, sourceTable) {
     // Try to create a title from various fields
     if (tender.project_name) {
         return `Tender for ${tender.project_name}`;
+    }
+    
+    // For SAM.gov tenders, try to extract from description or solicitation information
+    if (sourceTable === 'sam_gov') {
+        // Extract from solicitation number if available
+        if (tender.reference_number || tender.solicitation_number) {
+            const refNum = tender.reference_number || tender.solicitation_number;
+            return `SAM.gov Solicitation: ${refNum}`;
+        }
+        
+        // Generate from description when available
+        if (tender.description && tender.description.length > 10) {
+            // Take the first 100 characters from the description and use as title
+            const shortDesc = tender.description.substring(0, 100).trim();
+            return `${shortDesc}${shortDesc.length === 100 ? '...' : ''}`;
+        }
+        
+        // For original_data
+        if (tender.original_data) {
+            if (tender.original_data.subject || tender.original_data.title) {
+                return tender.original_data.subject || tender.original_data.title;
+            }
+            
+            if (tender.original_data.description && tender.original_data.description.length > 10) {
+                const shortDesc = tender.original_data.description.substring(0, 100).trim();
+                return `${shortDesc}${shortDesc.length === 100 ? '...' : ''}`;
+            }
+            
+            if (tender.original_data.solicitation_number) {
+                return `SAM.gov Solicitation: ${tender.original_data.solicitation_number}`;
+            }
+
+            if (tender.original_data.opportunity_type) {
+                return `${tender.original_data.opportunity_type} Opportunity from SAM.gov`;
+            }
+        }
     }
     
     if (tender.tender_type && tender.sector) {
@@ -2814,16 +2874,35 @@ function logTenderValidation(tender, validationResult) {
     }
 }
 
+// Add a global error handler for database schema issues
+function handleDatabaseError(error, tender) {
+    // Check if error is related to schema mismatch for the quality fields
+    if (error.message && error.message.includes('could not find') && 
+        (error.message.includes('quality_score') || 
+         error.message.includes('quality_validated') || 
+         error.message.includes('has_validation_issues'))) {
+         
+        console.warn('Database schema missing quality validation fields - disabling quality field insertion');
+        qualityFieldsAvailable = false;
+        
+        // Remove quality fields and return cleaned tender
+        const { quality_score, quality_validated, has_validation_issues, ...cleanedTender } = tender;
+        return cleanedTender;
+    }
+    
+    // For other errors, just rethrow
+    throw error;
+}
+
 module.exports = {
     normalizeTender,
-    queryLLM,
     enhanceTenderTitles,
-    fallbackNormalizeTender,
-    evaluateNormalizationNeeds,
-    fastNormalizeTender,
     fillMissingFields,
     validateTenderQuality,
     logTenderValidation,
     extractTenderType,
-    extractTenderStatus
+    extractTenderStatus,
+    fallbackNormalizeTender,
+    prepareForDatabaseInsertion,
+    handleDatabaseError
 };
