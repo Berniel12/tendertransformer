@@ -3,8 +3,18 @@
  * Service for processing tenders from various sources
  */
 
-const sourceRegistry = require('./sourceRegistry');
+// Import required dependencies
+const { v4: uuidv4 } = require('uuid');
+const sourceRegistry = require('../sources/sourceRegistry');
 const { normalizeTender, evaluateNormalizationNeeds } = require('./tenderNormalizer');
+
+// Configuration options
+const CONFIG = {
+    // Set to true to use fast normalization for World Bank tenders to improve performance
+    useWbFastNormalization: true,
+    // Timeout for LLM normalization in milliseconds (default: 20 seconds)
+    llmNormalizationTimeout: 20000
+};
 
 // Performance tracking variables
 const performanceStats = {
@@ -81,6 +91,11 @@ function extractNumericValue(value) {
 function shouldUseFastNormalization(sourceTable, normalizationNeeds) {
     // SAM.gov tenders always use fast normalization
     if (sourceTable === 'sam_gov') {
+        return true;
+    }
+    
+    // Use fast normalization for World Bank tenders if configured
+    if (sourceTable === 'wb' && CONFIG.useWbFastNormalization) {
         return true;
     }
 
@@ -455,6 +470,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     let normalizationReason = "";
                     if (tableName === 'sam_gov') {
                         normalizationReason = "SAM.gov tenders don't require translation or complex normalization";
+                    } else if (tableName === 'wb' && CONFIG.useWbFastNormalization) {
+                        normalizationReason = "World Bank tenders using optimized fast path (configured for performance)";
                     } else if (tender.description && tender.description.length > 10000) {
                         normalizationReason = "Tender description exceeds optimal size for LLM processing, using chunked parsing";
                     } else if (normalizationNeeds.minimalContent) {
@@ -487,7 +504,25 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     const startTime = Date.now();
                     let normalizedTender;
                     try {
-                        normalizedTender = await adapter.processTender(tender, normalizeTender, useFastNormalization);
+                        // Add timeout to prevent hanging on LLM normalization
+                        const processTenderPromise = adapter.processTender(tender, normalizeTender, useFastNormalization);
+                        
+                        // Only apply timeout if using LLM normalization (not fast normalization)
+                        if (!useFastNormalization) {
+                            normalizedTender = await promiseWithTimeout(
+                                processTenderPromise,
+                                CONFIG.llmNormalizationTimeout,
+                                'LLM normalization timed out'
+                            );
+                        } else {
+                            normalizedTender = await processTenderPromise;
+                        }
+                    } catch (error) {
+                        console.warn(`Normalization error: ${error.message}, falling back to fast normalization`);
+                        // If normalization fails, try fallback
+                        fallbackUsed = true;
+                        methodUsed = "Fallback";
+                        normalizedTender = await adapter.processTender(tender, normalizeTender, true);
                     } finally {
                         // Restore original console
                         console.log = originalConsoleLog;
@@ -897,6 +932,29 @@ async function processNewestTendersFromAllSources(supabaseAdmin, options = {}) {
     }
     
     return totalResults;
+}
+
+/**
+ * Helper function to add a timeout to a promise
+ * @param {Promise} promise - The promise to add a timeout to
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @param {string} errorMessage - Error message to throw on timeout
+ * @returns {Promise} A new promise with a timeout
+ */
+function promiseWithTimeout(promise, timeoutMs, errorMessage) {
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(errorMessage));
+        }, timeoutMs);
+    });
+
+    return Promise.race([
+        promise,
+        timeoutPromise
+    ]).finally(() => {
+        clearTimeout(timeoutId);
+    });
 }
 
 module.exports = {
