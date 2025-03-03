@@ -2155,6 +2155,15 @@ async function normalizeTender(tender, sourceTable) {
             normalizedData.source_table = sourceTable;
             normalizedData.processing_time_ms = endTime - startTime;
             
+            // Quality check before returning
+            const validationResult = validateTenderQuality(normalizedData);
+            logTenderValidation(normalizedData, validationResult);
+            
+            // Add validation metadata to the tender
+            normalizedData.quality_score = validationResult.qualityScore;
+            normalizedData.quality_validated = true;
+            normalizedData.has_validation_issues = !validationResult.isValid || validationResult.minorIssues.length > 0;
+            
             // For final results logging, also reduce frequency and simplify
             if (tenderProcessingCounter % 50 === 0) {
                 // Get the result from whatever normalization path was used
@@ -2176,6 +2185,7 @@ async function normalizeTender(tender, sourceTable) {
                 console.log(`\n--- FINAL RESULT - ${finalResult.normalized_method || 'unknown'} - ${(finalResult.processing_time_ms || 0)/1000}s ---`);
                 console.log(`Completeness: ${originalFilled}/${totalFields} → ${finalFilled}/${totalFields} fields`);
                 console.log(`Improvement: +${finalFilled - originalFilled} fields (${((finalFilled-originalFilled)/totalFields*100).toFixed(2)}%)`);
+                console.log(`Quality Score: ${finalResult.quality_score || 'Not evaluated'}`);
                 
                 // Show just a few key field changes to avoid log flooding
                 const keyFields = ['title', 'description', 'status', 'sector'];
@@ -2232,19 +2242,19 @@ async function normalizeTender(tender, sourceTable) {
         
         console.log(`LLM normalization completed in ${(endTime - startTime) / 1000} seconds`);
         
+        // Quality check before returning
+        const validationResult = validateTenderQuality(fullyEnhancedData);
+        logTenderValidation(fullyEnhancedData, validationResult);
+        
+        // Add validation metadata to the tender
+        fullyEnhancedData.quality_score = validationResult.qualityScore;
+        fullyEnhancedData.quality_validated = true;
+        fullyEnhancedData.has_validation_issues = !validationResult.isValid || validationResult.minorIssues.length > 0;
+        
         // Whether we used LLM, fast, or fallback normalization, log final results for sample tenders
         if (tenderProcessingCounter % 50 === 0) {
             // Get the result, whether it's enhancedData, normalizedData, or result from fallback
-            let finalResult;
-            if (typeof fullyEnhancedData !== 'undefined') {
-                finalResult = fullyEnhancedData;
-            } else if (typeof enhancedData !== 'undefined') {
-                finalResult = enhancedData;
-            } else if (typeof normalizedData !== 'undefined') {
-                finalResult = normalizedData;
-            } else {
-                finalResult = result;
-            }
+            let finalResult = fullyEnhancedData;
             
             const originalFilled = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
             const finalFilled = Object.values(finalResult).filter(v => v !== null && v !== undefined && v !== '').length;
@@ -2253,6 +2263,7 @@ async function normalizeTender(tender, sourceTable) {
             console.log(`\n--- FINAL RESULT - ${finalResult.normalized_method || 'unknown'} - ${(finalResult.processing_time_ms || 0)/1000}s ---`);
             console.log(`Completeness: ${originalFilled}/${totalFields} → ${finalFilled}/${totalFields} fields`);
             console.log(`Improvement: +${finalFilled - originalFilled} fields (${((finalFilled-originalFilled)/totalFields*100).toFixed(2)}%)`);
+            console.log(`Quality Score: ${finalResult.quality_score || 'Not evaluated'}`);
             
             // Show just a few key field changes to avoid log flooding
             const keyFields = ['title', 'description', 'status', 'sector'];
@@ -2344,55 +2355,64 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback', startTim
         // Create a minimal normalized object with error information
         result = {
             normalized_method: `${method}-error`,
-            description: error.message || 'Unknown error in fallback normalization',
-            title: tender.title || tender.name || 'Unknown tender',
-            status: 'error',
-            source_data: tender
+            error_message: error.message,
+            source_table: sourceTable,
+            source_id: tender.id || tender.notice_id || null,
+            title: tender.title || `Error processing tender from ${sourceTable}`,
+            description: tender.description || `Failed to normalize: ${error.message}`,
+            // Ensure minimal valid record with required fields
+            country: tender.country || determineCountryFromSource(tender, sourceTable) || 'Unknown',
+            normalized_at: new Date().toISOString()
         };
     }
+    
+    // Add source information for traceability
+    result.source_table = sourceTable;
+    result.source_id = tender.id || tender.notice_id || null;
+    
+    // Add timestamp
+    result.normalized_at = new Date().toISOString();
     
     const endTime = performance.now();
     const processingTime = (endTime - startTimeLocal) / 1000; // Convert to seconds
     
     console.log(`${method === 'rule-based-fast' ? 'Fast' : 'Fallback'} normalization completed in ${processingTime.toFixed(3)} seconds`);
     
-    // Add source info
-    result.source_table = sourceTable;
-    result.source_id = tender.id;
+    // Calculate processing time in milliseconds
+    result.processing_time_ms = Math.round(endTime - startTimeLocal);
     
-    // Log fallback results for sampling of tenders
+    // Quality check before returning
+    const validationResult = validateTenderQuality(result);
+    logTenderValidation(result, validationResult);
+    
+    // Add validation metadata to the tender
+    result.quality_score = validationResult.qualityScore;
+    result.quality_validated = true;
+    result.has_validation_issues = !validationResult.isValid || validationResult.minorIssues.length > 0;
+    
+    // Only log the full comparison for 1 in 50 tenders to reduce spam
     if (tenderProcessingCounter % 50 === 0) {
-        console.log(`\n========== FINAL NORMALIZATION RESULTS (FALLBACK) ==========`);
-        console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
-        console.log(`Normalization method: ${result.normalized_method}`);
-        console.log(`Processing time: ${processingTime.toFixed(3)} seconds`);
+        // Compare original to final state
+        const originalFilledFields = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+        const finalFilledFields = Object.values(result).filter(v => v !== null && v !== undefined && v !== '').length;
+        const totalFields = Math.max(Object.keys(originalTender).length, Object.keys(result).length);
         
-        try {
-            // Compare original vs final state
-            const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
-            const finalFilledCount = Object.values(result).filter(v => v !== null && v !== undefined && v !== '').length;
-            
-            console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
-            console.log(`Original filled fields: ${originalFilledCount}`);
-            console.log(`Final filled fields: ${finalFilledCount}`);
-            console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(result).length * 100).toFixed(2)}%)`);
-            
-            // Show dramatic changes in key fields
-            const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
-            console.log(`\nKEY FIELD CHANGES:`);
-            keyFields.forEach(field => {
-                const originalValue = originalTender[field] || '(empty)';
-                const finalValue = result[field] || '(empty)';
-                
-                if (originalValue !== finalValue) {
-                    console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
-                }
-            });
-        } catch (e) {
-            console.error('Error during logging:', e);
-        }
+        console.log(`\n--- COMPARISON FOR ${sourceTable}:${tender.id || 'unknown'} ---`);
+        console.log(`Fields filled: ${originalFilledFields} → ${finalFilledFields} (${((finalFilledFields-originalFilledFields)/totalFields*100).toFixed(2)}% improvement)`);
+        console.log(`Quality Score: ${result.quality_score}`);
         
-        console.log(`==================================================\n`);
+        // Show the before/after for key fields
+        const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
+        keyFields.forEach(field => {
+            const before = originalTender[field];
+            const after = result[field];
+            
+            if (before !== after) {
+                const beforeStr = before ? before.substring(0, 50) + (before.length > 50 ? '...' : '') : '(empty)';
+                const afterStr = after ? after.substring(0, 50) + (after.length > 50 ? '...' : '') : '(empty)';
+                console.log(`${field}: "${beforeStr}" → "${afterStr}"`);
+            }
+        });
     }
     
     return result;
@@ -2598,6 +2618,202 @@ function determineCountryFromSource(tender, sourceTable) {
     return null;
 }
 
+/**
+ * Validates a tender before saving to the unified table
+ * @param {Object} tender - The normalized tender data
+ * @returns {Object} Validation result with status and issues
+ */
+function validateTenderQuality(tender) {
+    const validationResult = {
+        isValid: true,
+        criticalIssues: [],
+        minorIssues: [],
+        qualityScore: 100 // Start with perfect score and deduct points
+    };
+    
+    // 1. Critical field checks - these must be present and non-empty
+    const criticalFields = [
+        { field: 'title', message: 'Missing title', deduction: 50 },
+        { field: 'description', message: 'Missing description', deduction: 40 },
+        { field: 'country', message: 'Missing country', deduction: 30 }
+    ];
+    
+    for (const check of criticalFields) {
+        if (!tender[check.field] || tender[check.field].trim() === '') {
+            validationResult.criticalIssues.push(check.message);
+            validationResult.qualityScore -= check.deduction;
+            validationResult.isValid = false;
+        }
+    }
+    
+    // 2. Value validation checks - these should contain reasonable values
+    if (tender.title && tender.title.length < 5) {
+        validationResult.criticalIssues.push('Title is too short (less than 5 characters)');
+        validationResult.qualityScore -= 30;
+        validationResult.isValid = false;
+    }
+    
+    if (tender.description && tender.description.length < 20) {
+        validationResult.criticalIssues.push('Description is too short (less than 20 characters)');
+        validationResult.qualityScore -= 20;
+        validationResult.isValid = false;
+    }
+    
+    // 3. Date validation checks - these should be valid dates
+    const dateFields = ['publication_date', 'deadline_date'];
+    for (const field of dateFields) {
+        if (tender[field]) {
+            const date = new Date(tender[field]);
+            if (date.toString() === 'Invalid Date') {
+                validationResult.minorIssues.push(`Invalid ${field} format`);
+                validationResult.qualityScore -= 5;
+            }
+        }
+    }
+    
+    // 4. Check for reasonable deadline (shouldn't be in distant past)
+    if (tender.deadline_date) {
+        const deadline = new Date(tender.deadline_date);
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        
+        if (deadline < oneYearAgo) {
+            validationResult.minorIssues.push('Deadline date is more than 1 year in the past');
+            validationResult.qualityScore -= 10;
+        }
+    }
+    
+    // 5. Check for impractically short notice periods
+    if (tender.publication_date && tender.deadline_date) {
+        const pubDate = new Date(tender.publication_date);
+        const deadDate = new Date(tender.deadline_date);
+        
+        const daysDiff = Math.floor((deadDate - pubDate) / (1000 * 60 * 60 * 24));
+        
+        if (daysDiff < 0) {
+            validationResult.minorIssues.push('Deadline is before publication date');
+            validationResult.qualityScore -= 15;
+        } else if (daysDiff < 3) {
+            validationResult.minorIssues.push('Very short notice period (less than 3 days)');
+            validationResult.qualityScore -= 5;
+        }
+    }
+    
+    // 6. Check for overall field completeness (non-critical fields)
+    const desirableFields = [
+        'tender_type', 'status', 'organization_name', 'sector', 
+        'estimated_value', 'currency', 'url'
+    ];
+    
+    let missingDesirableFields = 0;
+    for (const field of desirableFields) {
+        if (!tender[field] || tender[field].trim() === '') {
+            missingDesirableFields++;
+        }
+    }
+    
+    // Deduct points based on how many desirable fields are missing
+    if (missingDesirableFields > 0) {
+        const deduction = Math.min(20, missingDesirableFields * 3); // Cap at 20 points
+        validationResult.qualityScore -= deduction;
+        validationResult.minorIssues.push(`Missing ${missingDesirableFields} out of ${desirableFields.length} desirable fields`);
+    }
+    
+    // Ensure quality score doesn't go below 0
+    validationResult.qualityScore = Math.max(0, validationResult.qualityScore);
+    
+    // If quality score is very low but no critical issues were found, still mark as potentially problematic
+    if (validationResult.qualityScore < 40 && validationResult.criticalIssues.length === 0) {
+        validationResult.minorIssues.push('Very low overall quality score');
+    }
+    
+    return validationResult;
+}
+
+/**
+ * Logs the quality validation results for a tender
+ * @param {Object} tender - The tender that was validated 
+ * @param {Object} validationResult - The result from validateTenderQuality
+ */
+function logTenderValidation(tender, validationResult) {
+    const tenderId = tender.id || tender.notice_id || 'unknown';
+    const sourceTable = tender.source_table || 'unknown';
+    
+    if (!validationResult.isValid) {
+        console.error(`❌ VALIDATION FAILED for ${sourceTable}:${tenderId} - Quality Score: ${validationResult.qualityScore}`);
+        
+        if (validationResult.criticalIssues.length > 0) {
+            console.error(`   Critical Issues (${validationResult.criticalIssues.length}):`);
+            validationResult.criticalIssues.forEach(issue => console.error(`   - ${issue}`));
+        }
+    } else if (validationResult.minorIssues.length > 0) {
+        console.warn(`⚠️ VALIDATION PASSED WITH WARNINGS for ${sourceTable}:${tenderId} - Quality Score: ${validationResult.qualityScore}`);
+        console.warn(`   Minor Issues (${validationResult.minorIssues.length}):`);
+        validationResult.minorIssues.forEach(issue => console.warn(`   - ${issue}`));
+    } else {
+        // Only log full success for every 50th tender to reduce console spam
+        if (tenderProcessingCounter % 50 === 0) {
+            console.log(`✅ VALIDATION PASSED for ${sourceTable}:${tenderId} - Perfect Quality Score: 100`);
+        }
+    }
+    
+    // Update global validation statistics
+    if (!global.validationStats) {
+        global.validationStats = {
+            total: 0,
+            passed: 0,
+            warnings: 0,
+            failed: 0,
+            bySource: {}
+        };
+    }
+    
+    global.validationStats.total++;
+    
+    if (!validationResult.isValid) {
+        global.validationStats.failed++;
+    } else if (validationResult.minorIssues.length > 0) {
+        global.validationStats.warnings++;
+    } else {
+        global.validationStats.passed++;
+    }
+    
+    // Track by source table
+    if (!global.validationStats.bySource[sourceTable]) {
+        global.validationStats.bySource[sourceTable] = {
+            total: 0, passed: 0, warnings: 0, failed: 0
+        };
+    }
+    
+    global.validationStats.bySource[sourceTable].total++;
+    
+    if (!validationResult.isValid) {
+        global.validationStats.bySource[sourceTable].failed++;
+    } else if (validationResult.minorIssues.length > 0) {
+        global.validationStats.bySource[sourceTable].warnings++;
+    } else {
+        global.validationStats.bySource[sourceTable].passed++;
+    }
+    
+    // Print summary every 100 tenders
+    if (global.validationStats.total % 100 === 0) {
+        console.log('\n=== TENDER VALIDATION STATISTICS ===');
+        console.log(`Total Processed: ${global.validationStats.total}`);
+        console.log(`Passed: ${global.validationStats.passed} (${(global.validationStats.passed / global.validationStats.total * 100).toFixed(1)}%)`);
+        console.log(`Warnings: ${global.validationStats.warnings} (${(global.validationStats.warnings / global.validationStats.total * 100).toFixed(1)}%)`);
+        console.log(`Failed: ${global.validationStats.failed} (${(global.validationStats.failed / global.validationStats.total * 100).toFixed(1)}%)`);
+        
+        console.log('\nBy Source:');
+        for (const [source, stats] of Object.entries(global.validationStats.bySource)) {
+            const passRate = (stats.passed / stats.total * 100).toFixed(1);
+            const warnRate = (stats.warnings / stats.total * 100).toFixed(1);
+            const failRate = (stats.failed / stats.total * 100).toFixed(1);
+            console.log(`${source}: ${stats.total} tenders - ${passRate}% pass, ${warnRate}% warn, ${failRate}% fail`);
+        }
+        console.log('=====================================\n');
+    }
+}
+
 module.exports = {
     normalizeTender,
     queryLLM,
@@ -2605,5 +2821,9 @@ module.exports = {
     fallbackNormalizeTender,
     evaluateNormalizationNeeds,
     fastNormalizeTender,
-    fillMissingFields
+    fillMissingFields,
+    validateTenderQuality,
+    logTenderValidation,
+    extractTenderType,
+    extractTenderStatus
 };
