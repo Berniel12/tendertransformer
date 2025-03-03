@@ -192,6 +192,9 @@ async function main() {
         const command = args[0];
         const sourceName = args[1];
         
+        // Check if running on Apify
+        const isRunningOnApify = process.env.APIFY_IS_AT_HOME === '1' || process.env.APIFY_CONTAINER_URL;
+        
         if (command === 'process' && sourceName) {
             // Process tenders from a specific source
             await processTendersFromSource(sourceName);
@@ -208,8 +211,14 @@ async function main() {
             // Show usage instructions
             showUsage();
         } else {
-            // Default behavior: run continuous processing
-            await runContinuousProcessingWrapper();
+            // Default behavior based on environment
+            if (isRunningOnApify) {
+                console.log('Running on Apify - using process-all-unprocessed as default command');
+                await processAllUnprocessed();
+            } else {
+                // Run continuous processing for local development
+                await runContinuousProcessingWrapper();
+            }
         }
     } catch (error) {
         console.error('Error running tender processing application:', error);
@@ -253,5 +262,6 @@ module.exports = {
     processTendersFromSource,
     processAllSources,
     processAllSourcesRoundRobin,
-    runContinuousProcessingWrapper
+    runContinuousProcessingWrapper,
+    processAllUnprocessed
 };
