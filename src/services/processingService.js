@@ -469,7 +469,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     }
     
     // Process tenders in chunks with controlled concurrency
-    for (let i = 0; i < tendersToProcess.length && (unlimitedProcessing || processedCount < limit); i += chunkSize) {
+    for (let i = 0; i < tendersToProcess.length; i += chunkSize) {
         const chunk = tendersToProcess.slice(i, i + chunkSize);
         console.log(`Processing chunk from ${i} to ${i + chunk.length} of ${tendersToProcess.length}`);
         
@@ -687,8 +687,8 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
             })
         );
         
-        // If we've reached the limit or processed all tenders, break
-        if (processedCount >= limit || i + chunkSize >= tendersToProcess.length) {
+        // If we've processed all tenders, break
+        if (i + chunkSize >= tendersToProcess.length) {
             break;
         }
     }
