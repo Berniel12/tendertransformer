@@ -13,6 +13,80 @@ const performanceStats = {
 };
 
 /**
+ * Global counter to track processing for selective logging
+ */
+let tenderProcessingCounter = 0;
+
+/**
+ * Log normalization statistics and field changes
+ * @param {string} phase - Normalization phase name
+ * @param {Object} before - State before normalization
+ * @param {Object} after - State after normalization
+ * @param {string} [note] - Additional note
+ */
+function logNormalizationStats(phase, before, after, note = '') {
+    // Only log approximately 1 in 10 tenders to avoid excessive logging
+    tenderProcessingCounter++;
+    if (tenderProcessingCounter % 10 !== 0) return;
+    
+    console.log(`\n========== NORMALIZATION STATISTICS [${phase}] ==========`);
+    if (note) console.log(`NOTE: ${note}`);
+    
+    // Track changed fields
+    const changedFields = [];
+    const emptyFields = [];
+    const filledFields = [];
+    
+    // Compare before and after for all fields
+    Object.keys(after).forEach(key => {
+        // Skip metadata fields
+        if (['normalized_at', 'normalized_by', 'normalized_method', 'processing_time_ms'].includes(key)) {
+            return;
+        }
+        
+        const beforeValue = before[key];
+        const afterValue = after[key];
+        
+        // Track fields that changed during normalization
+        if (beforeValue !== afterValue && afterValue !== null && afterValue !== undefined) {
+            changedFields.push({
+                field: key,
+                before: beforeValue || '(empty)',
+                after: afterValue
+            });
+        }
+        
+        // Track empty vs. filled fields
+        if (afterValue === null || afterValue === undefined || afterValue === '') {
+            emptyFields.push(key);
+        } else {
+            filledFields.push(key);
+        }
+    });
+    
+    // Log field changes
+    if (changedFields.length > 0) {
+        console.log("\nFIELDS CHANGED DURING NORMALIZATION:");
+        changedFields.forEach(change => {
+            console.log(`${change.field}:\n  BEFORE: ${change.before}\n  AFTER:  ${change.after}`);
+        });
+    }
+    
+    // Log filled vs empty fields
+    console.log(`\nFIELD COMPLETION STATISTICS:`);
+    console.log(`Total fields: ${filledFields.length + emptyFields.length}`);
+    console.log(`Filled fields: ${filledFields.length} (${((filledFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
+    console.log(`Empty fields: ${emptyFields.length} (${((emptyFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
+    
+    if (emptyFields.length > 0) {
+        console.log("\nEMPTY FIELDS AFTER NORMALIZATION:");
+        console.log(emptyFields.join(', '));
+    }
+    
+    console.log("========================================================\n");
+}
+
+/**
  * Queries the LLM service with the provided prompt
  * @param {string} prompt - The prompt to send to the LLM
  * @returns {Promise<Object>} The LLM response
@@ -265,8 +339,8 @@ function parseJSONFromLLMResponse(responseText) {
 }
 
 /**
- * Post-processes tender titles to improve clarity and consistency
- * @param {Object} normalizedData - The normalized tender data from LLM
+ * Enhances tender titles by standardizing format and removing redundancies
+ * @param {Object} normalizedData - The tender data to process
  * @returns {Object} The tender data with improved titles
  */
 function enhanceTenderTitles(normalizedData) {
@@ -274,9 +348,12 @@ function enhanceTenderTitles(normalizedData) {
         return normalizedData;
     }
     
+    // Clone the input object to preserve the original state for logging
+    const originalData = JSON.parse(JSON.stringify(normalizedData));
+    
     let title = normalizedData.title;
     let titleEnglish = normalizedData.title_english || '';
-
+    
     // 1. Remove common prefix patterns that don't add value
     const prefixPatterns = [
         /^FORECAST\s*[IVX]*\s*-+\s*/i,   // FORECAST II -
@@ -286,7 +363,24 @@ function enhanceTenderTitles(normalizedData) {
         /^REF[\s.:-]+/i,                 // REF: or REF. or REF -
         /^RFP[\s.:-]+/i,                 // RFP: or RFP. or RFP -
         /^ITB[\s.:-]+/i,                 // ITB: or ITB. or ITB -
-        /^NO[\s.:-]+\d+/i                // NO. 12345 or NO: 12345
+        /^NO[\s.:-]+\d+/i,               // NO. 12345 or NO: 12345
+        /^[A-Z]\s*--\s*/i,               // Patterns like "R -- "
+        /^Sources\s+Sought[:\s-]+/i,     // "Sources Sought:"
+        /^Tender[:\s-]+/i,               // "Tender:"
+        /^Notice[:\s-]+/i,               // "Notice:"
+        /^Solicitation[:\s-]+/i,         // "Solicitation:"
+        /^Combined Synopsis[:\s-]+/i,    // "Combined Synopsis:"
+        /^Project\s+Title[:\s-]+/i,      // "Project Title:"
+        /^Title[:\s-]+/i,                // "Title:"
+        /^Brief\s+Description[:\s-]+/i,  // "Brief Description:"
+        /^Short\s+Title[:\s-]+/i,        // "Short Title:"
+        /^Purchase\s+of[:\s-]+/i,        // "Purchase of:"
+        /^Amendment\s+\d+\s+to\s+/i,     // "Amendment 1 to"
+        /^Modified\s+/i,                 // "Modified"
+        /^Revised\s+/i,                  // "Revised"
+        /^Update[d]?\s+/i,               // "Update" or "Updated"
+        /^Correction\s+to\s+/i,          // "Correction to"
+        /^Re[:\s-]+/i                    // "Re:"
     ];
     
     for (const pattern of prefixPatterns) {
@@ -298,15 +392,21 @@ function enhanceTenderTitles(normalizedData) {
     
     // 2. Clean up titles that are just abbreviations or codes in parentheses
     title = title.replace(/\s*\([A-Z]{2,5}\)\s*$/i, '');
+    title = title.replace(/\(\d+\)\s*$/i, ''); // Remove number in parentheses at end
     if (titleEnglish) {
         titleEnglish = titleEnglish.replace(/\s*\([A-Z]{2,5}\)\s*$/i, '');
+        titleEnglish = titleEnglish.replace(/\(\d+\)\s*$/i, '');
     }
 
     // 3. Move reference numbers to the end of the title
     const refNumberPatterns = [
         /\b([A-Z]{2,4}-\d{2,}-\d{2,})\b/g,     // Format like "ICB-20-12345"
         /\b(\d{5,})\b/g,                        // Random long numbers
-        /\b([A-Z]{2,}\d{4,})\b/g                // Format like "ABC12345"
+        /\b([A-Z]{2,}\d{4,})\b/g,               // Format like "ABC12345"
+        /\b([A-Z]{1,3}\/\d{2,}\/\d{2,})\b/g,    // Format like "A/12/345"
+        /\b(RFx\d{4,})\b/gi,                    // Format like "RFx12345"
+        /\b(RFQ-\d{4,})\b/gi,                   // Format like "RFQ-12345"
+        /\b(RFP-\d{4,})\b/gi                    // Format like "RFP-12345"
     ];
     
     let refNumbers = [];
@@ -319,12 +419,12 @@ function enhanceTenderTitles(normalizedData) {
         }
     }
     
-    // 4. Fix ALL CAPS titles
+    // 4. Fix ALL CAPS titles - this is critical for readability
     if (title === title.toUpperCase() && title.length > 10) {
         // Convert to Title Case (capitalize first letter of each word)
         title = title.toLowerCase().replace(/\b\w+/g, word => {
             // Skip short conjunctions, articles, and prepositions unless they're the first word
-            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of'];
+            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of', 'with', 'under', 'above', 'between', 'among'];
             return minorWords.includes(word) ? word : word.charAt(0).toUpperCase() + word.slice(1);
         });
         
@@ -334,13 +434,13 @@ function enhanceTenderTitles(normalizedData) {
     
     if (titleEnglish === titleEnglish.toUpperCase() && titleEnglish.length > 10) {
         titleEnglish = titleEnglish.toLowerCase().replace(/\b\w+/g, word => {
-            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of'];
+            const minorWords = ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of', 'with', 'under', 'above', 'between', 'among'];
             return minorWords.includes(word) ? word : word.charAt(0).toUpperCase() + word.slice(1);
         });
         titleEnglish = titleEnglish.charAt(0).toUpperCase() + titleEnglish.slice(1);
     }
     
-    // 5. Expand common acronyms
+    // 5. Expand common acronyms for better readability
     const acronymMap = {
         'ICB': 'International Competitive Bidding for',
         'NCB': 'National Competitive Bidding for',
@@ -348,71 +448,561 @@ function enhanceTenderTitles(normalizedData) {
         'IT': 'Information Technology',
         'RFP': 'Request for Proposal:',
         'EOI': 'Expression of Interest:',
+        'USAID': 'US Agency for International Development',
+        'USPSC': 'US Personal Services Contractor',
+        'IQC': 'Indefinite Quantity Contract',
+        'SOL': '',  // Often just a prefix to a solicitation number
+        'PSC': 'Personal Services Contractor',
+        'IDIQ': 'Indefinite Delivery/Indefinite Quantity',
+        'FSN': 'Foreign Service National',
+        'COP': 'Chief of Party',
+        'PAD': 'Project Appraisal Document',
+        'RFQ': 'Request for Quotation:',
+        'ITB': 'Invitation to Bid:',
+        'PMSC': 'Project Management Services Contractor',
+        'SME': 'Small and Medium Enterprise',
+        'CSO': 'Civil Society Organization',
+        'NGO': 'Non-Governmental Organization',
+        'UNDP': 'United Nations Development Programme',
+        'ADB': 'Asian Development Bank',
+        'WB': 'World Bank',
+        'EPC': 'Engineering, Procurement, and Construction',
         'HVAC': 'Heating, Ventilation, and Air Conditioning',
+        'MOU': 'Memorandum of Understanding',
+        'CLIN': 'Contract Line Item Number',
+        'GSA': 'General Services Administration',
+        'MRO': 'Maintenance, Repair, and Operations',
+        'WASH': 'Water, Sanitation, and Hygiene',
         'PPE': 'Personal Protective Equipment',
-        'O&M': 'Operation and Maintenance',
-        'M&E': 'Monitoring and Evaluation'
+        'VAT': 'Value Added Tax'
     };
     
-    // Replace standalone acronyms (surrounded by spaces or at start/end)
+    // Only expand acronyms if they are standalone words (surrounded by spaces or at start/end)
     for (const [acronym, expansion] of Object.entries(acronymMap)) {
-        const pattern = new RegExp(`\\b${acronym}\\b`, 'g');
-        if (pattern.test(title)) {
-            title = title.replace(pattern, expansion);
+        const regex = new RegExp(`\\b${acronym}\\b`, 'g');
+        
+        // Only replace if the acronym is a standalone word and not part of a larger word
+        if (regex.test(title)) {
+            title = title.replace(regex, expansion);
         }
-        if (titleEnglish && pattern.test(titleEnglish)) {
-            titleEnglish = titleEnglish.replace(pattern, expansion);
+        
+        if (titleEnglish && regex.test(titleEnglish)) {
+            titleEnglish = titleEnglish.replace(regex, expansion);
         }
     }
     
-    // 6. Clean up excessive spacing
-    title = title.replace(/\s+/g, ' ').trim();
+    // 6. Remove redundancies in title (repeated words)
+    title = title.replace(/\b(\w+)(\s+\1\b)+/gi, '$1');
     if (titleEnglish) {
-        titleEnglish = titleEnglish.replace(/\s+/g, ' ').trim();
+        titleEnglish = titleEnglish.replace(/\b(\w+)(\s+\1\b)+/gi, '$1');
     }
     
-    // 7. Truncate extremely long titles (over 150 chars) with ellipsis but preserve meaning
-    if (title.length > 150) {
-        // Split by common separators and keep first meaningful part
-        const parts = title.split(/\s[-–—:]\s|\s*\|\s*|\s*;\s*/);
-        if (parts.length > 1 && parts[0].length > 20) {
-            title = parts[0].trim() + '...';
-        } else if (title.length > 150) {
-            title = title.substring(0, 147) + '...';
-        }
+    // 7. Fix titles that are truncated with ellipsis by removing the ellipsis
+    title = title.replace(/\.{3,}$/g, '');
+    if (titleEnglish) {
+        titleEnglish = titleEnglish.replace(/\.{3,}$/g, '');
     }
-
-    if (titleEnglish && titleEnglish.length > 150) {
-        const parts = titleEnglish.split(/\s[-–—:]\s|\s*\|\s*|\s*;\s*/);
-        if (parts.length > 1 && parts[0].length > 20) {
-            titleEnglish = parts[0].trim() + '...';
-        } else if (titleEnglish.length > 150) {
-            titleEnglish = titleEnglish.substring(0, 147) + '...';
+    
+    // 8. Remove very common tender-related generic words at the beginning
+    const genericPrefixWords = [
+        /^Supply of\s+/i,
+        /^Provision of\s+/i,
+        /^Procurement of\s+/i,
+        /^Purchase of\s+/i,
+        /^Tender for\s+/i,
+        /^Contract for\s+/i
+    ];
+    
+    // Only remove these if the remaining title is substantial (more than 5 words)
+    if (title.split(/\s+/).length > 5) {
+        for (const pattern of genericPrefixWords) {
+            title = title.replace(pattern, '');
+            if (titleEnglish) {
+                titleEnglish = titleEnglish.replace(pattern, '');
+            }
         }
     }
     
-    // 8. Capitalize first letter if entire title is lowercase
-    if (/^[a-z]/.test(title)) {
+    // 9. Trim extra spaces
+    title = title.replace(/\s{2,}/g, ' ').trim();
+    if (titleEnglish) {
+        titleEnglish = titleEnglish.replace(/\s{2,}/g, ' ').trim();
+    }
+    
+    // 10. Add reference numbers at the end if available
+    if (refNumbers.length > 0 && normalizedData.reference_number) {
+        // Use the official reference number instead of extracted ones
+        if (!title.includes(normalizedData.reference_number)) {
+            title = `${title} (${normalizedData.reference_number})`;
+        }
+    } else if (refNumbers.length > 0) {
+        // If no official reference number, use extracted ones
+        title = `${title} (${refNumbers.join(' ')})`;
+    }
+    
+    // 11. Ensure the first letter of the title is capitalized
+    if (title && title.length > 0) {
         title = title.charAt(0).toUpperCase() + title.slice(1);
     }
     
-    if (titleEnglish && /^[a-z]/.test(titleEnglish)) {
+    if (titleEnglish && titleEnglish.length > 0) {
         titleEnglish = titleEnglish.charAt(0).toUpperCase() + titleEnglish.slice(1);
     }
     
-    // 9. Add reference numbers back at the end if found
-    if (refNumbers.length > 0) {
-        title = title + ` (Ref: ${refNumbers.join(', ')})`;
+    // 12. Ensure title doesn't end with punctuation
+    title = title.replace(/[.,;:-]+$/, '');
+    if (titleEnglish) {
+        titleEnglish = titleEnglish.replace(/[.,;:-]+$/, '');
+    }
+    
+    // 13. Fix the casing of specific keywords that should always be capitalized
+    const alwaysCapitalizeWords = ['UN', 'US', 'UK', 'EU', 'COVID', 'COVID-19', 'IT', 'IoT', 'AI', 'API', 'ICT', 'SMS'];
+    
+    for (const word of alwaysCapitalizeWords) {
+        const regex = new RegExp(`\\b${word.toLowerCase()}\\b`, 'g');
+        title = title.replace(regex, word);
         if (titleEnglish) {
-            titleEnglish = titleEnglish + ` (Ref: ${refNumbers.join(', ')})`;
+            titleEnglish = titleEnglish.replace(regex, word);
         }
     }
     
-    // Update the normalized data
+    // Update the normalized data with the enhanced titles
     normalizedData.title = title;
     if (titleEnglish) {
         normalizedData.title_english = titleEnglish;
+    } else if (isEnglishText(title)) {
+        // If the main title is English and we don't have a separate English title, copy it
+        normalizedData.title_english = title;
     }
+    
+    // Log changes for a sample of tenders
+    logNormalizationStats('Title Enhancement', originalData, normalizedData, 
+        `Title was ${originalData.title ? 'transformed' : 'missing'}`);
+    
+    return normalizedData;
+}
+
+/**
+ * Fills missing fields in the normalized data based on available information
+ * @param {Object} normalizedData - The tender data to enhance
+ * @returns {Object} Enhanced tender data with filled fields
+ */
+function fillMissingFields(normalizedData) {
+    if (!normalizedData) return normalizedData;
+    
+    // Clone the input object to preserve the original state for logging
+    const originalData = JSON.parse(JSON.stringify(normalizedData));
+    
+    // Track which fields were filled by this function
+    const fieldsFilledByFunction = [];
+    
+    // 1. If we have title but no title_english and the title is in English
+    if (normalizedData.title && !normalizedData.title_english && isEnglishText(normalizedData.title)) {
+        normalizedData.title_english = normalizedData.title;
+        fieldsFilledByFunction.push('title_english');
+    }
+    
+    // 2. If we have description but no description_english and the description is in English
+    if (normalizedData.description && !normalizedData.description_english && isEnglishText(normalizedData.description)) {
+        normalizedData.description_english = normalizedData.description;
+        fieldsFilledByFunction.push('description_english');
+    }
+    
+    // 3. If organization_name is missing but we have organization_id
+    if (!normalizedData.organization_name && normalizedData.organization_id) {
+        // Map common organization IDs to names
+        const orgIdMap = {
+            '100171790': 'USAID (US Agency for International Development)',
+            '100175108': 'USAID East Africa',
+            '100175112': 'USAID Southern Africa',
+            '100181493': 'USAID Afghanistan',
+            '100184904': 'USAID Kosovo',
+            '100187934': 'USAID Sudan',
+            '100000000': 'World Bank',
+            '100000001': 'Asian Development Bank',
+            '100000002': 'European Union',
+            '100000003': 'United Nations Development Programme'
+        };
+        
+        if (orgIdMap[normalizedData.organization_id]) {
+            normalizedData.organization_name = orgIdMap[normalizedData.organization_id];
+            fieldsFilledByFunction.push('organization_name');
+            
+            normalizedData.organization_name_english = orgIdMap[normalizedData.organization_id];
+            fieldsFilledByFunction.push('organization_name_english');
+        }
+    }
+    
+    // 4. If we have organization_name but no organization_name_english and org name is in English
+    if (normalizedData.organization_name && !normalizedData.organization_name_english && 
+        isEnglishText(normalizedData.organization_name)) {
+        normalizedData.organization_name_english = normalizedData.organization_name;
+        fieldsFilledByFunction.push('organization_name_english');
+    }
+    
+    // 5. If status is missing but we have deadline_date
+    if (!normalizedData.status && normalizedData.deadline_date) {
+        const deadlineDate = new Date(normalizedData.deadline_date);
+        const now = new Date();
+        normalizedData.status = deadlineDate > now ? 'Open' : 'Closed';
+        fieldsFilledByFunction.push('status');
+    }
+    
+    // 6. Extract buyer from description if missing
+    if (!normalizedData.buyer && normalizedData.description) {
+        // Look for patterns indicating a buyer in the description
+        const buyerPatterns = [
+            /(?:issued by|purchaser|buyer|procuring entity|client|contracting authority|awarded to|contractor)[\s:]*([A-Za-z0-9\s.,&'()-]+?)(?:\.|,|\n|$)/i,
+            /(?:on behalf of|for the)[\s:]*([A-Za-z0-9\s.,&'()-]+?)(?:\.|,|\n|$)/i
+        ];
+        
+        for (const pattern of buyerPatterns) {
+            const match = normalizedData.description.match(pattern);
+            if (match && match[1] && match[1].length > 3 && match[1].length < 100) {
+                normalizedData.buyer = match[1].trim();
+                fieldsFilledByFunction.push('buyer');
+                
+                if (isEnglishText(normalizedData.buyer)) {
+                    normalizedData.buyer_english = normalizedData.buyer;
+                    fieldsFilledByFunction.push('buyer_english');
+                }
+                break;
+            }
+        }
+    }
+    
+    // 7. Set normalized_at if it's missing
+    if (!normalizedData.normalized_at) {
+        normalizedData.normalized_at = new Date().toISOString();
+    }
+    
+    // 8. If project_name is missing but can be extracted from description
+    if (!normalizedData.project_name && normalizedData.description) {
+        const projectPatterns = [
+            /project name[\s:]*([A-Za-z0-9\s.,'"()-]+?)(?:\.|,|\n|$)/i,
+            /project[\s:]*([A-Za-z0-9\s.,'"()-]+?)(?:\.|,|\n|$)/i,
+            /program[\s:]*([A-Za-z0-9\s.,'"()-]+?)(?:\.|,|\n|$)/i,
+            /contract for[\s:]*([A-Za-z0-9\s.,'"()-]+?)(?:\.|,|\n|$)/i,
+            /related to[\s:]*([A-Za-z0-9\s.,'"()-]+?)(?:\.|,|\n|$)/i
+        ];
+        
+        for (const pattern of projectPatterns) {
+            const match = normalizedData.description.match(pattern);
+            if (match && match[1] && match[1].length > 3 && match[1].length < 100) {
+                normalizedData.project_name = match[1].trim();
+                if (isEnglishText(normalizedData.project_name)) {
+                    normalizedData.project_name_english = normalizedData.project_name;
+                }
+                break;
+            }
+        }
+    }
+    
+    // 9. Extract sector information if missing
+    if (!normalizedData.sector && normalizedData.description) {
+        // Common sectors that might be mentioned in the description
+        const sectorKeywords = {
+            'Information Technology': ['IT', 'software', 'hardware', 'computer', 'technology', 'digital', 'cloud', 'data center', 'system integration', 'ERP', 'SAP', 'AI', 'artificial intelligence', 'machine learning', 'database'],
+            'Healthcare': ['health', 'medical', 'hospital', 'clinic', 'pharmaceutical', 'drug', 'healthcare', 'medicine', 'patient', 'doctor', 'nurse', 'diagnostic', 'treatment'],
+            'Construction': ['construction', 'building', 'infrastructure', 'road', 'bridge', 'dam', 'highway', 'renovation', 'civil works', 'contractor', 'concrete', 'asphalt', 'engineering'],
+            'Education': ['education', 'school', 'university', 'college', 'training', 'learning', 'academic', 'student', 'teacher', 'educational', 'curriculum', 'classroom'],
+            'Agriculture': ['agriculture', 'farming', 'crop', 'livestock', 'irrigation', 'farm', 'agricultural', 'food', 'seed', 'fertilizer', 'harvesting', 'plantation'],
+            'Energy': ['energy', 'power', 'electricity', 'renewable', 'solar', 'wind', 'hydroelectric', 'fossil fuel', 'coal', 'gas', 'oil', 'nuclear', 'grid', 'transmission'],
+            'Transportation': ['transport', 'logistics', 'shipping', 'freight', 'rail', 'railway', 'airport', 'port', 'vessel', 'car', 'truck', 'bus', 'metro', 'transit'],
+            'Telecommunications': ['telecom', 'communication', 'network', 'cellular', 'mobile', 'fiber optic', 'broadband', 'internet', 'wireless', '5G', '4G', 'LTE', 'cable'],
+            'Financial Services': ['financial', 'banking', 'insurance', 'investment', 'finance', 'loan', 'credit', 'bank', 'capital', 'fund', 'pension', 'accounting', 'audit'],
+            'Environmental': ['environment', 'environmental', 'conservation', 'sustainability', 'waste', 'pollution', 'recycling', 'climate', 'green', 'eco', 'biodiversity', 'wastewater'],
+            'Water & Sanitation': ['water', 'sanitation', 'sewage', 'plumbing', 'drainage', 'potable', 'clean water', 'drinking water', 'pump', 'pipe', 'WASH', 'hygiene'],
+            'Defense & Security': ['defense', 'security', 'military', 'weapon', 'surveillance', 'protection', 'police', 'intelligence', 'radar', 'armor', 'combat', 'cyber'],
+            'Mining': ['mining', 'mineral', 'ore', 'extraction', 'quarry', 'coal', 'gold', 'silver', 'copper', 'excavation', 'drill'],
+            'Manufacturing': ['manufacturing', 'factory', 'industrial', 'assembly', 'production', 'machinery', 'equipment', 'fabrication', 'processing'],
+            'Retail & Consumer Goods': ['retail', 'consumer', 'merchandise', 'goods', 'product', 'store', 'ecommerce', 'supply chain'],
+            'Tourism & Hospitality': ['tourism', 'hospitality', 'hotel', 'restaurant', 'travel', 'leisure', 'accommodation', 'tourist']
+        };
+        
+        // Find sector keywords in the description
+        const description = normalizedData.description.toLowerCase();
+        const title = normalizedData.title ? normalizedData.title.toLowerCase() : '';
+        
+        let bestSector = null;
+        let highestCount = 0;
+        
+        Object.entries(sectorKeywords).forEach(([sector, keywords]) => {
+            let count = 0;
+            keywords.forEach(keyword => {
+                const regex = new RegExp(`\\b${keyword}\\b`, 'ig');
+                
+                // Check description
+                const descMatches = description.match(regex);
+                if (descMatches) count += descMatches.length;
+                
+                // Check title with higher weight (x2)
+                if (title) {
+                    const titleMatches = title.match(regex);
+                    if (titleMatches) count += titleMatches.length * 2;
+                }
+            });
+            
+            if (count > highestCount) {
+                highestCount = count;
+                bestSector = sector;
+            }
+        });
+        
+        // Only set sector if we have a reasonable confidence (at least 2 mentions or 1 in title)
+        if (highestCount >= 2) {
+            normalizedData.sector = bestSector;
+        }
+    }
+    
+    // 10. Extract country from other fields if missing
+    if (!normalizedData.country && normalizedData.description) {
+        // Look for common country mentions in the description
+        const commonCountries = [
+            'Afghanistan', 'Albania', 'Algeria', 'Angola', 'Argentina', 'Armenia', 'Australia', 'Austria', 
+            'Azerbaijan', 'Bangladesh', 'Belgium', 'Benin', 'Bolivia', 'Bosnia', 'Botswana', 'Brazil', 
+            'Bulgaria', 'Burkina Faso', 'Burundi', 'Cambodia', 'Cameroon', 'Canada', 'Chad', 'Chile', 
+            'China', 'Colombia', 'Congo', 'Costa Rica', 'Croatia', 'Cuba', 'Cyprus', 'Czech Republic', 
+            'Denmark', 'Dominican Republic', 'DR Congo', 'Ecuador', 'Egypt', 'El Salvador', 'Estonia', 
+            'Ethiopia', 'Finland', 'France', 'Georgia', 'Germany', 'Ghana', 'Greece', 'Guatemala', 
+            'Guinea', 'Haiti', 'Honduras', 'Hungary', 'Iceland', 'India', 'Indonesia', 'Iran', 'Iraq', 
+            'Ireland', 'Israel', 'Italy', 'Jamaica', 'Japan', 'Jordan', 'Kazakhstan', 'Kenya', 'Kosovo', 
+            'Kuwait', 'Kyrgyzstan', 'Laos', 'Latvia', 'Lebanon', 'Lesotho', 'Liberia', 'Libya', 
+            'Lithuania', 'Madagascar', 'Malawi', 'Malaysia', 'Mali', 'Mauritania', 'Mexico', 'Moldova', 
+            'Mongolia', 'Montenegro', 'Morocco', 'Mozambique', 'Myanmar', 'Namibia', 'Nepal', 
+            'Netherlands', 'New Zealand', 'Nicaragua', 'Niger', 'Nigeria', 'North Macedonia', 'Norway', 
+            'Pakistan', 'Palestine', 'Panama', 'Papua New Guinea', 'Paraguay', 'Peru', 'Philippines', 
+            'Poland', 'Portugal', 'Qatar', 'Romania', 'Russia', 'Rwanda', 'Saudi Arabia', 'Senegal', 
+            'Serbia', 'Sierra Leone', 'Singapore', 'Slovakia', 'Slovenia', 'Somalia', 'South Africa', 
+            'South Korea', 'South Sudan', 'Spain', 'Sri Lanka', 'Sudan', 'Sweden', 'Switzerland', 
+            'Syria', 'Taiwan', 'Tajikistan', 'Tanzania', 'Thailand', 'Timor-Leste', 'Togo', 'Tunisia', 
+            'Turkey', 'Turkmenistan', 'Uganda', 'Ukraine', 'United Arab Emirates', 'United Kingdom', 
+            'United States', 'USA', 'Uruguay', 'Uzbekistan', 'Venezuela', 'Vietnam', 'Yemen', 'Zambia', 
+            'Zimbabwe'
+        ];
+        
+        // Create a regex pattern for all countries
+        const countriesPattern = new RegExp(`\\b(${commonCountries.join('|')})\\b`, 'i');
+        
+        // Search in description
+        const match = normalizedData.description.match(countriesPattern);
+        if (match && match[1]) {
+            normalizedData.country = match[1];
+        }
+    }
+    
+    // 11. Extract reference_number if missing
+    if (!normalizedData.reference_number) {
+        // Check title and description for common reference number patterns
+        const refNumberPatterns = [
+            /\b([A-Z]{2,4}-\d{2,}-\d{2,})\b/,        // Format like "ICB-20-12345"
+            /\bRef(?:erence)?\s*(?:No)?[:.]\s*([A-Z0-9-/]+)/i,  // Format like "Ref. ABC/123"
+            /\bRFP\s*(?:No)?[:.]\s*([A-Z0-9-/]+)/i,  // Format like "RFP No. 12345"
+            /\bRFQ\s*(?:No)?[:.]\s*([A-Z0-9-/]+)/i,  // Format like "RFQ No. 12345"
+            /\bITB\s*(?:No)?[:.]\s*([A-Z0-9-/]+)/i,  // Format like "ITB No. 12345"
+            /\bNo\.\s*([A-Z0-9-/]+)/i,               // Format like "No. ABC123"
+            /\bTender ID[:.]\s*([A-Z0-9-/]+)/i,      // Format like "Tender ID: 12345"
+            /\bNotice ID[:.]\s*([A-Z0-9-/]+)/i,      // Format like "Notice ID: 12345"
+            /\bProject ID[:.]\s*([A-Z0-9-/]+)/i      // Format like "Project ID: 12345"
+        ];
+        
+        // Check title first
+        if (normalizedData.title) {
+            for (const pattern of refNumberPatterns) {
+                const match = normalizedData.title.match(pattern);
+                if (match && match[1]) {
+                    normalizedData.reference_number = match[1];
+                    break;
+                }
+            }
+        }
+        
+        // If still not found, check description
+        if (!normalizedData.reference_number && normalizedData.description) {
+            for (const pattern of refNumberPatterns) {
+                const match = normalizedData.description.match(pattern);
+                if (match && match[1]) {
+                    normalizedData.reference_number = match[1];
+                    break;
+                }
+            }
+        }
+    }
+    
+    // 12. Extract contact information from description if missing
+    if ((!normalizedData.contact_email || !normalizedData.contact_name) && normalizedData.description) {
+        // Email extraction
+        if (!normalizedData.contact_email) {
+            const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
+            const emailMatches = normalizedData.description.match(emailRegex);
+            if (emailMatches && emailMatches.length > 0) {
+                normalizedData.contact_email = emailMatches[0];
+            }
+        }
+        
+        // Contact name extraction
+        if (!normalizedData.contact_name) {
+            const contactPatterns = [
+                /contact person[\s:]*([A-Za-z0-9\s.,'()-]+?)(?:\.|,|\n|$)/i,
+                /contact[\s:]*([A-Za-z0-9\s.,'()-]+?)(?:\.|,|\n|$)/i,
+                /(?:attention|attn)[\s:]*([A-Za-z0-9\s.,'()-]+?)(?:\.|,|\n|$)/i,
+                /for (?:more )?(?:information|details)[,\s]+(?:please )?contact[\s:]*([A-Za-z0-9\s.,'()-]+?)(?:\.|,|\n|$)/i
+            ];
+            
+            for (const pattern of contactPatterns) {
+                const match = normalizedData.description.match(pattern);
+                if (match && match[1] && match[1].length > 3 && match[1].length < 50) {
+                    normalizedData.contact_name = match[1].trim();
+                    break;
+                }
+            }
+        }
+        
+        // Phone number extraction
+        if (!normalizedData.contact_phone) {
+            const phonePatterns = [
+                /(?:phone|tel|telephone)[\s:]*([+0-9\s.()-]{7,20})(?:\.|,|\n|$)/i,
+                /\b(?:[+]?[0-9]{1,3}[-. ]?)?[(]?[0-9]{3}[)]?[-. ]?[0-9]{3}[-. ]?[0-9]{4}\b/g
+            ];
+            
+            for (const pattern of phonePatterns) {
+                const match = normalizedData.description.match(pattern);
+                if (match && match[1] && match[1].length > 6) {
+                    normalizedData.contact_phone = match[1].trim();
+                    break;
+                } else if (match && match[0] && match[0].length > 6) {
+                    normalizedData.contact_phone = match[0].trim();
+                    break;
+                }
+            }
+        }
+    }
+    
+    // 13. Extract tender_type from title and description if missing
+    if (!normalizedData.tender_type) {
+        const tenderTypeKeywords = {
+            'Request for Proposal (RFP)': ['request for proposal', 'rfp'],
+            'Request for Quotation (RFQ)': ['request for quotation', 'rfq', 'price quotation', 'quote'],
+            'Invitation to Bid (ITB)': ['invitation to bid', 'itb', 'bidding'],
+            'Expression of Interest (EOI)': ['expression of interest', 'eoi', 'interest'],
+            'Request for Information (RFI)': ['request for information', 'rfi'],
+            'Pre-Qualification': ['pre-qualification', 'prequalification'],
+            'Direct Contract': ['direct contract', 'direct award', 'sole source'],
+            'Framework Agreement': ['framework', 'framework agreement', 'indefinite delivery'],
+            'Construction Contract': ['construction contract', 'works contract', 'civil works'],
+            'Service Contract': ['service contract', 'services'],
+            'Supply Contract': ['supply contract', 'supplies', 'goods'],
+            'Consulting Services': ['consulting', 'consultant']
+        };
+        
+        let bestMatch = null;
+        let highestScore = 0;
+        
+        const titleText = normalizedData.title ? normalizedData.title.toLowerCase() : '';
+        const descText = normalizedData.description ? normalizedData.description.toLowerCase() : '';
+        
+        Object.entries(tenderTypeKeywords).forEach(([tenderType, keywords]) => {
+            let score = 0;
+            
+            keywords.forEach(keyword => {
+                // Check title (higher weight)
+                if (titleText.includes(keyword)) {
+                    score += 3;
+                }
+                
+                // Check description
+                if (descText.includes(keyword)) {
+                    score += 1;
+                }
+            });
+            
+            if (score > highestScore) {
+                highestScore = score;
+                bestMatch = tenderType;
+            }
+        });
+        
+        if (bestMatch) {
+            normalizedData.tender_type = bestMatch;
+        }
+    }
+    
+    // 14. Extract or estimate value and currency if missing
+    if (!normalizedData.estimated_value && normalizedData.description) {
+        const moneyPatterns = [
+            /(?:budget|value|amount|contract value|estimated value|cost|price)[\s:]*(?:is|of|:)?\s*(?:USD|EUR|GBP|Rs\.?|₹|£|€|\$)?\s*([0-9,.]+)\s*(?:million|m|billion|b)?\s*(?:USD|EUR|GBP|Rs\.?|₹|£|€|\$)?/i,
+            /(?:USD|EUR|GBP|Rs\.?|₹|£|€|\$)\s*([0-9,.]+)\s*(?:million|m|billion|b)?/i
+        ];
+        
+        for (const pattern of moneyPatterns) {
+            const match = normalizedData.description.match(pattern);
+            if (match && match[1]) {
+                let value = match[1].replace(/,/g, '');
+                let multiplier = 1;
+                
+                // Check for million/billion
+                if (match[0].toLowerCase().includes('million') || match[0].toLowerCase().includes('m')) {
+                    multiplier = 1000000;
+                } else if (match[0].toLowerCase().includes('billion') || match[0].toLowerCase().includes('b')) {
+                    multiplier = 1000000000;
+                }
+                
+                normalizedData.estimated_value = parseFloat(value) * multiplier;
+                
+                // Try to extract currency
+                const currencySymbols = {
+                    '$': 'USD',
+                    '€': 'EUR',
+                    '£': 'GBP',
+                    '₹': 'INR',
+                    'Rs': 'INR',
+                    'USD': 'USD',
+                    'EUR': 'EUR',
+                    'GBP': 'GBP'
+                };
+                
+                Object.entries(currencySymbols).forEach(([symbol, currency]) => {
+                    if (match[0].includes(symbol)) {
+                        normalizedData.currency = currency;
+                    }
+                });
+                
+                break;
+            }
+        }
+    }
+    
+    // 15. Ensure city field has proper capitalization
+    if (normalizedData.city && typeof normalizedData.city === 'string') {
+        normalizedData.city = normalizedData.city.replace(/\b\w/g, c => c.toUpperCase());
+    }
+    
+    // 16. Ensure country field has proper capitalization
+    if (normalizedData.country && typeof normalizedData.country === 'string') {
+        // Special handling for countries with specific capitalization
+        const specialCountries = {
+            'usa': 'USA',
+            'uk': 'UK',
+            'uae': 'UAE',
+            'united states': 'United States',
+            'united states of america': 'United States of America',
+            'united kingdom': 'United Kingdom',
+            'united arab emirates': 'United Arab Emirates'
+        };
+        
+        const lowercaseCountry = normalizedData.country.toLowerCase();
+        if (specialCountries[lowercaseCountry]) {
+            normalizedData.country = specialCountries[lowercaseCountry];
+        } else {
+            normalizedData.country = normalizedData.country.replace(/\b\w/g, c => c.toUpperCase());
+        }
+    }
+    
+    // At the end of the function, log the changes
+    logNormalizationStats('Field Filling', originalData, normalizedData, 
+        fieldsFilledByFunction.length > 0 ? 
+        `Filled ${fieldsFilledByFunction.length} fields: ${fieldsFilledByFunction.join(', ')}` :
+        'No fields were filled');
     
     return normalizedData;
 }
@@ -426,289 +1016,116 @@ function enhanceTenderTitles(normalizedData) {
  * @returns {Object} Basic normalized tender data
  */
 function fallbackNormalizeTender(tenderData, sourceTable) {
-    console.log(`Using fallback normalization for ${sourceTable} due to LLM unavailability`);
+    console.log(`Using fallback normalization for ${sourceTable} tender`);
     
-    // Initialize normalized data with null values
-    const normalizedData = {
-        title: null,
-        title_english: null,
-        description: null,
-        description_english: null,
-        tender_type: null,
-        status: null,
-        publication_date: null,
-        deadline_date: null,
-        country: null,
-        city: null,
-        organization_name: null,
-        organization_name_english: null,
-        organization_id: null,
-        buyer: null,
-        buyer_english: null,
-        project_name: null,
-        project_name_english: null,
-        project_id: null,
-        project_number: null,
-        sector: null,
-        estimated_value: null,
-        currency: null,
-        contact_name: null,
-        contact_email: null,
-        contact_phone: null,
-        contact_address: null,
-        url: null,
-        document_links: [],
-        language: 'en', // Default assumption
-        notice_id: null,
-        reference_number: null,
-        procurement_method: null
+    // Create a base normalized object with the same fields as LLM output
+    const normalizedTender = {
+        title: tenderData.title || tenderData.name || null,
+        description: tenderData.description || tenderData.details || null,
+        tender_type: extractTenderType(tenderData, sourceTable),
+        status: extractTenderStatus(tenderData, sourceTable),
+        publication_date: tenderData.publication_date || tenderData.publicationDate || tenderData.published_date || null,
+        deadline_date: tenderData.deadline_date || tenderData.deadlineDate || tenderData.closing_date || null,
+        country: tenderData.country || tenderData.countryName || null,
+        city: tenderData.city || tenderData.cityName || null,
+        organization_name: tenderData.organization_name || tenderData.organizationName || tenderData.agency || null,
+        organization_id: tenderData.organization_id || tenderData.organizationId || null,
+        buyer: tenderData.buyer || tenderData.buyerName || null,
+        project_name: tenderData.project_name || tenderData.projectName || null,
+        project_id: tenderData.project_id || tenderData.projectId || null,
+        project_number: tenderData.project_number || tenderData.projectNumber || null,
+        sector: tenderData.sector || tenderData.sectorName || null,
+        estimated_value: extractNumericValue(tenderData.estimated_value || tenderData.estimatedValue || tenderData.value || null),
+        currency: tenderData.currency || null,
+        contact_name: tenderData.contact_name || tenderData.contactName || null,
+        contact_email: tenderData.contact_email || tenderData.contactEmail || null,
+        contact_phone: tenderData.contact_phone || tenderData.contactPhone || null,
+        contact_address: tenderData.contact_address || tenderData.contactAddress || null,
+        url: tenderData.url || tenderData.noticeUrl || tenderData.tenderUrl || null,
+        // Handle document links with consideration for different formats
+        document_links: extractDocumentLinks(tenderData),
+        language: tenderData.language || 'en',  // Default to English
+        notice_id: tenderData.notice_id || tenderData.noticeId || tenderData.id || null,
+        reference_number: tenderData.reference_number || tenderData.referenceNumber || tenderData.solicitation_number || null,
+        procurement_method: tenderData.procurement_method || tenderData.procurementMethod || null,
+        // Include source information for traceability
+        source_table: sourceTable,
+        source_id: tenderData.id || tenderData.tender_id || tenderData.notice_id || null,
     };
-
-    // Source-specific field mapping
-    if (sourceTable === 'sam_gov') {
-        // SAM.gov specific fields
-        normalizedData.title = tenderData.opportunity_title || null;
-        normalizedData.description = tenderData.description || null;
-        normalizedData.notice_id = tenderData.opportunity_id?.toString() || null;
-        normalizedData.reference_number = tenderData.solicitation_number || null;
-        normalizedData.organization_id = tenderData.organization_id || null;
-        normalizedData.country = "UNITED STATES"; // Default for SAM.gov
-        
-        // Try to extract dates
-        if (tenderData.publish_date) {
-            try {
-                normalizedData.publication_date = new Date(tenderData.publish_date).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse publication date: ${tenderData.publish_date}`);
-            }
-        }
-        
-        if (tenderData.response_date) {
-            try {
-                normalizedData.deadline_date = new Date(tenderData.response_date).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse deadline date: ${tenderData.response_date}`);
-            }
-        }
-        
-        // Status mapping
-        if (tenderData.opportunity_status) {
-            const status = tenderData.opportunity_status.toLowerCase();
-            if (status === 'active') normalizedData.status = 'Open';
-            else if (status === 'inactive' || status === 'archived') normalizedData.status = 'Closed';
-            else if (status === 'awarded') normalizedData.status = 'Awarded';
-            else if (status === 'canceled') normalizedData.status = 'Canceled';
-            else normalizedData.status = tenderData.opportunity_status;
-        }
-        
-        // Type mapping
-        if (tenderData.opportunity_type) {
-            const type = tenderData.opportunity_type.toLowerCase();
-            if (type === 'solicitation') normalizedData.tender_type = 'Tender';
-            else if (type === 'presolicitation') normalizedData.tender_type = 'Prior Information Notice';
-            else if (type === 'award') normalizedData.tender_type = 'Contract Award';
-            else if (type === 'intent_to_award') normalizedData.tender_type = 'Intent to Award';
-            else if (type === 'sources_sought') normalizedData.tender_type = 'Request for Information';
-            else if (type === 'special_notice') normalizedData.tender_type = 'Special Notice';
-            else if (type === 'sale_of_surplus') normalizedData.tender_type = 'Sale';
-            else if (type === 'combined_synopsis_solicitation') normalizedData.tender_type = 'Request for Proposal';
-            else normalizedData.tender_type = tenderData.opportunity_type;
-        }
-        
-        // Try to extract email from description
-        const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-        if (normalizedData.description) {
-            const emailMatches = normalizedData.description.match(emailRegex);
-            if (emailMatches && emailMatches.length > 0) {
-                normalizedData.contact_email = emailMatches[0];
-            }
-        }
-        
-        // Generate URL
-        if (tenderData.opportunity_id) {
-            normalizedData.url = `https://sam.gov/opp/${tenderData.opportunity_id}/view`;
-        }
-        
-        // Extract organization name if available
-        if (tenderData.organizationName) {
-            normalizedData.organization_name = tenderData.organizationName;
-        } else if (tenderData.agency) {
-            normalizedData.organization_name = tenderData.agency;
-        }
-        
-        // Extract sector from NAICS code if available
-        if (tenderData.naics_code) {
-            const naicsPrefix = tenderData.naics_code.substring(0, 3);
-            const naicsFirstTwo = tenderData.naics_code.substring(0, 2);
-            
-            if (naicsPrefix === '541') normalizedData.sector = "Information Technology";
-            else if (['236', '237', '238'].includes(naicsPrefix)) normalizedData.sector = "Construction";
-            else if (['31', '32', '33'].includes(naicsFirstTwo)) normalizedData.sector = "Manufacturing";
-            else if (naicsFirstTwo === '54') normalizedData.sector = "Professional Services";
-            else if (naicsFirstTwo === '62') normalizedData.sector = "Healthcare";
-            else if (naicsPrefix === '336') normalizedData.sector = "Defense and Aerospace";
-            else if (naicsFirstTwo === '48') normalizedData.sector = "Transportation";
-            else if (naicsFirstTwo === '22') normalizedData.sector = "Utilities";
-            else if (naicsFirstTwo === '11') normalizedData.sector = "Agriculture";
-        }
-
-        // Extract currency values
-        try {
-            // Helper function to extract numeric values
-            function extractNumericValue(value) {
-                if (value === null || value === undefined) return null;
-                try {
-                    if (typeof value === 'number') return value;
-                    let cleanValue = value.toString()
-                        .replace(/[A-Z]{3}\s*/g, '')
-                        .replace(/[$€£¥]/g, '')
-                        .replace(/,/g, '')
-                        .trim();
-                    const numericValue = parseFloat(cleanValue);
-                    return isNaN(numericValue) ? null : numericValue;
-                } catch (error) {
-                    console.warn(`Failed to extract numeric value from: ${value}`);
-                    return null;
+    
+    // Handle source-specific formatting
+    switch (sourceTable) {
+        case 'sam_gov':
+            // For SAM.gov tenders, add specific handling
+            if (tenderData.original_data) {
+                // Extract organization name if needed
+                if (!normalizedTender.organization_name && tenderData.original_data.org_key) {
+                    normalizedTender.organization_name = `Organization ID: ${tenderData.original_data.org_key}`;
                 }
+                
+                // Extract contacts
+                if (tenderData.original_data.contacts && tenderData.original_data.contacts.length > 0) {
+                    const primaryContact = tenderData.original_data.contacts.find(c => c.contact_type === 'primary') || 
+                                          tenderData.original_data.contacts[0];
+                    
+                    if (primaryContact) {
+                        normalizedTender.contact_name = primaryContact.full_name || normalizedTender.contact_name;
+                        normalizedTender.contact_email = primaryContact.email || normalizedTender.contact_email;
+                        normalizedTender.contact_phone = primaryContact.phone || normalizedTender.contact_phone;
+                    }
+                }
+                
+                // Extract tender type
+                if (!normalizedTender.tender_type && tenderData.original_data.opportunity_type) {
+                    normalizedTender.tender_type = tenderData.original_data.opportunity_type;
+                }
+                
+                // Extract reference number
+                if (!normalizedTender.reference_number && tenderData.original_data.solicitation_number) {
+                    normalizedTender.reference_number = tenderData.original_data.solicitation_number;
+                }
+                
+                // Set country as UNITED STATES if it's a SAM.gov tender
+                normalizedTender.country = normalizedTender.country || 'UNITED STATES';
             }
-
-            normalizedData.estimated_value = extractNumericValue(
-                tenderData.estimated_value || 
-                tenderData.potential_award_amount || 
-                tenderData.award_amount
-            );
+            break;
             
-            normalizedData.contract_value = extractNumericValue(
-                tenderData.contract_value || 
-                tenderData.award_amount || 
-                tenderData.potential_award_amount
-            );
-        } catch (e) {
-            console.warn(`Failed to process currency values: ${e.message}`);
-        }
-    }
-    else if (sourceTable === 'ted') {
-        // TED (Tenders Electronic Daily) specific fields
-        normalizedData.title = tenderData.title || null;
-        normalizedData.reference_number = tenderData.document_number || null;
-        normalizedData.notice_id = tenderData.document_number || null;
-        normalizedData.country = tenderData.country || null;
-        normalizedData.organization_name = tenderData.contracting_authority || null;
-        
-        // Extract dates
-        if (tenderData.publication_date) {
-            try {
-                normalizedData.publication_date = new Date(tenderData.publication_date).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse TED publication date: ${tenderData.publication_date}`);
+        case 'wb':
+            // For World Bank tenders, add specific handling
+            if (!normalizedTender.organization_name) {
+                normalizedTender.organization_name = 'World Bank';
             }
-        }
-        
-        if (tenderData.deadline_date) {
-            try {
-                normalizedData.deadline_date = new Date(tenderData.deadline_date).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse TED deadline date: ${tenderData.deadline_date}`);
+            if (!normalizedTender.organization_name_english) {
+                normalizedTender.organization_name_english = 'World Bank';
             }
-        }
-        
-        // Try to determine status based on dates
-        if (normalizedData.deadline_date) {
-            const now = new Date();
-            const deadline = new Date(normalizedData.deadline_date);
-            normalizedData.status = deadline > now ? 'Open' : 'Closed';
-        }
-        
-        // Set URL
-        if (tenderData.document_number) {
-            normalizedData.url = `https://ted.europa.eu/udl?uri=TED:NOTICE:${tenderData.document_number}:TEXT:EN:HTML`;
-        }
-        
-        // Set language - typically multilingual with English
-        normalizedData.language = 'en';
-    }
-    else if (sourceTable === 'iadb') {
-        // Inter-American Development Bank fields
-        normalizedData.title = tenderData.project_name || null;
-        normalizedData.description = tenderData.description || tenderData.project_description || null;
-        normalizedData.project_id = tenderData.project_number?.toString() || null;
-        normalizedData.project_name = tenderData.project_name || null;
-        normalizedData.country = tenderData.country || null;
-        normalizedData.organization_name = "Inter-American Development Bank";
-        normalizedData.organization_name_english = "Inter-American Development Bank";
-        
-        // Process dates if available
-        if (tenderData.publication_date) {
-            try {
-                normalizedData.publication_date = new Date(tenderData.publication_date).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse IADB publication date: ${tenderData.publication_date}`);
+            break;
+            
+        case 'adb':
+            // For Asian Development Bank tenders, add specific handling
+            if (!normalizedTender.organization_name) {
+                normalizedTender.organization_name = 'Asian Development Bank';
             }
-        }
-        
-        if (tenderData.deadline) {
-            try {
-                normalizedData.deadline_date = new Date(tenderData.deadline).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse IADB deadline date: ${tenderData.deadline}`);
+            if (!normalizedTender.organization_name_english) {
+                normalizedTender.organization_name_english = 'Asian Development Bank';
             }
-        }
-        
-        // Generate URL
-        if (tenderData.project_number) {
-            normalizedData.url = `https://www.iadb.org/en/project/${tenderData.project_number}`;
-        }
-        
-        // Default values for IADB
-        normalizedData.tender_type = 'Development Project';
-        normalizedData.sector = tenderData.sector || null;
-    }
-    else if (sourceTable === 'un_procurement') {
-        // UN Procurement fields
-        normalizedData.title = tenderData.title || null;
-        normalizedData.reference_number = tenderData.reference || null;
-        normalizedData.organization_name = tenderData.agency || "United Nations";
-        normalizedData.organization_name_english = tenderData.agency || "United Nations";
-        
-        // Process dates if available
-        if (tenderData.published) {
-            try {
-                normalizedData.publication_date = new Date(tenderData.published).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse UN publication date: ${tenderData.published}`);
-            }
-        }
-        
-        if (tenderData.deadline) {
-            try {
-                normalizedData.deadline_date = new Date(tenderData.deadline).toISOString().split('T')[0];
-            } catch (e) {
-                console.warn(`Failed to parse UN deadline date: ${tenderData.deadline}`);
-            }
-        }
-        
-        // Set URL if available
-        normalizedData.url = tenderData.url || null;
-        
-        // Set language - UN typically uses English
-        normalizedData.language = 'en';
-        
-        // Try to determine status based on dates
-        if (normalizedData.deadline_date) {
-            const now = new Date();
-            const deadline = new Date(normalizedData.deadline_date);
-            normalizedData.status = deadline > now ? 'Open' : 'Closed';
-        }
-    }
-    // Add other source handlers as needed
-    
-    // Apply title normalization to the basic extracted title
-    if (normalizedData.title) {
-        const enhancedData = enhanceTenderTitles(normalizedData);
-        return enhancedData;
+            break;
     }
     
-    return normalizedData;
+    // Now apply our enhanced title normalization
+    const enhancedTender = enhanceTenderTitles(normalizedTender);
+    
+    // Fill in any remaining missing fields
+    const fullyEnhancedTender = fillMissingFields(enhancedTender);
+    
+    // Make sure we have normalized_at timestamp
+    if (!fullyEnhancedTender.normalized_at) {
+        fullyEnhancedTender.normalized_at = new Date().toISOString();
+    }
+    
+    // Set normalized_by field to indicate fallback normalization
+    fullyEnhancedTender.normalized_by = 'rule-based-fallback';
+    
+    return fullyEnhancedTender;
 }
 
 /**
@@ -1049,7 +1466,11 @@ async function fastNormalizeTender(tenderData, sourceTable) {
     // Clean up and enhance all extracted fields
     enhanceExtractedFields(normalized);
     
-    return normalized;
+    // Apply our enhanced title normalization and field filling
+    const enhancedTender = enhanceTenderTitles(normalized);
+    const fullyEnhancedTender = fillMissingFields(enhancedTender);
+    
+    return fullyEnhancedTender;
 }
 
 /**
@@ -1309,6 +1730,34 @@ async function normalizeTender(tender, sourceTable) {
     console.log(`Evaluating normalization needs for tender from ${sourceTable}`);
     const startTime = Date.now();
     
+    // Save original state for logging
+    const originalTender = JSON.parse(JSON.stringify(tender));
+    
+    // Log initial state for sample tenders
+    tenderProcessingCounter++;
+    if (tenderProcessingCounter % 10 === 0) {
+        console.log(`\n========== PROCESSING TENDER #${tenderProcessingCounter} ==========`);
+        console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
+        
+        // Log initial field completion statistics
+        const filledFields = [];
+        const emptyFields = [];
+        
+        Object.entries(tender).forEach(([key, value]) => {
+            if (value === null || value === undefined || value === '') {
+                emptyFields.push(key);
+            } else {
+                filledFields.push(key);
+            }
+        });
+        
+        console.log(`\nINITIAL FIELD STATISTICS:`);
+        console.log(`Total fields: ${filledFields.length + emptyFields.length}`);
+        console.log(`Filled fields: ${filledFields.length} (${((filledFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
+        console.log(`Empty fields: ${emptyFields.length} (${((emptyFields.length / (filledFields.length + emptyFields.length)) * 100).toFixed(2)}%)`);
+        console.log(`==================================================\n`);
+    }
+    
     try {
         // Skip LLM for certain tenders
         const evaluation = evaluateNormalizationNeeds(tender, sourceTable);
@@ -1325,6 +1774,37 @@ async function normalizeTender(tender, sourceTable) {
             normalizedData.normalized_method = 'rule-based-fast';
             normalizedData.source_table = sourceTable;
             normalizedData.processing_time_ms = endTime - startTime;
+            
+            // Log final results for this fast path too
+            if (tenderProcessingCounter % 10 === 0) {
+                console.log(`\n========== FINAL NORMALIZATION RESULTS (FAST PATH) ==========`);
+                console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
+                console.log(`Normalization method: ${normalizedData.normalized_method}`);
+                console.log(`Processing time: ${(endTime - startTime) / 1000} seconds`);
+                
+                // Compare original vs final state
+                const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+                const finalFilledCount = Object.values(normalizedData).filter(v => v !== null && v !== undefined && v !== '').length;
+                
+                console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
+                console.log(`Original filled fields: ${originalFilledCount}`);
+                console.log(`Final filled fields: ${finalFilledCount}`);
+                console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(normalizedData).length * 100).toFixed(2)}%)`);
+                
+                // Show dramatic changes in key fields
+                const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
+                console.log(`\nKEY FIELD CHANGES:`);
+                keyFields.forEach(field => {
+                    const originalValue = originalTender[field] || '(empty)';
+                    const finalValue = normalizedData[field] || '(empty)';
+                    
+                    if (originalValue !== finalValue) {
+                        console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
+                    }
+                });
+                
+                console.log(`==================================================\n`);
+            }
             
             return normalizedData;
         }
@@ -1353,20 +1833,64 @@ async function normalizeTender(tender, sourceTable) {
             return fallbackWithMetadata(tender, sourceTable, 'json-parse-failure', startTime);
         }
         
-        // Enhance the normalized data
+        // Enhance the normalized data with better titles and fill missing fields
         const enhancedData = enhanceTenderTitles(normalizedData);
+        const fullyEnhancedData = fillMissingFields(enhancedData);
         
         // Add metadata
-        enhancedData.normalized_at = new Date().toISOString();
-        enhancedData.normalized_method = 'llm';
-        enhancedData.source_table = sourceTable;
+        fullyEnhancedData.normalized_at = new Date().toISOString();
+        fullyEnhancedData.normalized_method = 'llm';
+        fullyEnhancedData.source_table = sourceTable;
         
         const endTime = Date.now();
-        enhancedData.processing_time_ms = endTime - startTime;
+        fullyEnhancedData.processing_time_ms = endTime - startTime;
         
         console.log(`LLM normalization completed in ${(endTime - startTime) / 1000} seconds`);
         
-        return enhancedData;
+        // Whether we used LLM, fast, or fallback normalization, log final results for sample tenders
+        if (tenderProcessingCounter % 10 === 0) {
+            // Get the result, whether it's enhancedData, normalizedData, or result from fallback
+            let finalResult;
+            if (typeof fullyEnhancedData !== 'undefined') {
+                finalResult = fullyEnhancedData;
+            } else if (typeof enhancedData !== 'undefined') {
+                finalResult = enhancedData;
+            } else if (typeof normalizedData !== 'undefined') {
+                finalResult = normalizedData;
+            } else {
+                finalResult = result;
+            }
+            
+            console.log(`\n========== FINAL NORMALIZATION RESULTS ==========`);
+            console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
+            console.log(`Normalization method: ${finalResult.normalized_method || 'unknown'}`);
+            console.log(`Processing time: ${(finalResult.processing_time_ms || 0) / 1000} seconds`);
+            
+            // Compare original vs final state
+            const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+            const finalFilledCount = Object.values(finalResult).filter(v => v !== null && v !== undefined && v !== '').length;
+            
+            console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
+            console.log(`Original filled fields: ${originalFilledCount}`);
+            console.log(`Final filled fields: ${finalFilledCount}`);
+            console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(finalResult).length * 100).toFixed(2)}%)`);
+            
+            // Show dramatic changes in key fields
+            const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
+            console.log(`\nKEY FIELD CHANGES:`);
+            keyFields.forEach(field => {
+                const originalValue = originalTender[field] || '(empty)';
+                const finalValue = finalResult[field] || '(empty)';
+                
+                if (originalValue !== finalValue) {
+                    console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
+                }
+            });
+            
+            console.log(`==================================================\n`);
+        }
+        
+        return fullyEnhancedData;
     } catch (error) {
         console.error(`Error normalizing tender: ${error.message}`);
         
@@ -1396,6 +1920,9 @@ async function normalizeTender(tender, sourceTable) {
 function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
     console.log(`Using ${method} normalization for ${sourceTable}: ${tender.id || 'unknown'}`);
     const startTime = performance.now();
+    
+    // Save original state for logging
+    const originalTender = JSON.parse(JSON.stringify(tender));
     
     let result;
     try {
@@ -1434,6 +1961,41 @@ function fallbackWithMetadata(tender, sourceTable, method = 'fallback') {
     // Add source info
     result.source_table = sourceTable;
     result.source_id = tender.id;
+    
+    // Log fallback results for sampling of tenders
+    if (tenderProcessingCounter % 10 === 0) {
+        console.log(`\n========== FINAL NORMALIZATION RESULTS (FALLBACK) ==========`);
+        console.log(`Source: ${sourceTable}, ID: ${tender.id || 'unknown'}`);
+        console.log(`Normalization method: ${result.normalized_method}`);
+        console.log(`Processing time: ${processingTime.toFixed(3)} seconds`);
+        
+        try {
+            // Compare original vs final state
+            const originalFilledCount = Object.values(originalTender).filter(v => v !== null && v !== undefined && v !== '').length;
+            const finalFilledCount = Object.values(result).filter(v => v !== null && v !== undefined && v !== '').length;
+            
+            console.log(`\nFIELD COMPLETION IMPROVEMENT:`);
+            console.log(`Original filled fields: ${originalFilledCount}`);
+            console.log(`Final filled fields: ${finalFilledCount}`);
+            console.log(`Improvement: ${finalFilledCount - originalFilledCount} new fields filled (${((finalFilledCount - originalFilledCount) / Object.keys(result).length * 100).toFixed(2)}%)`);
+            
+            // Show dramatic changes in key fields
+            const keyFields = ['title', 'description', 'organization_name', 'status', 'sector', 'tender_type'];
+            console.log(`\nKEY FIELD CHANGES:`);
+            keyFields.forEach(field => {
+                const originalValue = originalTender[field] || '(empty)';
+                const finalValue = result[field] || '(empty)';
+                
+                if (originalValue !== finalValue) {
+                    console.log(`${field}:\n  BEFORE: ${originalValue}\n  AFTER:  ${finalValue}`);
+                }
+            });
+        } catch (e) {
+            console.error('Error during logging:', e);
+        }
+        
+        console.log(`==================================================\n`);
+    }
     
     return result;
 }
@@ -1506,5 +2068,6 @@ module.exports = {
     enhanceTenderTitles,
     fallbackNormalizeTender,
     evaluateNormalizationNeeds,
-    fastNormalizeTender
+    fastNormalizeTender,
+    fillMissingFields
 };
