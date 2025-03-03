@@ -361,13 +361,13 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     // Track performance statistics
                     trackPerformance(tableName, normalizedTender, processingTime);
                     
-                    // Log normalization method
-                    if (normalizedTender.normalized_method === 'rule-based-fallback') {
-                        console.log(`Using fallback normalization for ${tableName} due to LLM unavailability`);
-                        fallbackCount++;
-                    } else if (normalizedTender.normalized_method === 'rule-based-fast') {
+                    // Log normalization method - simplified and more consistent messaging
+                    if (normalizedTender.normalized_method === 'rule-based-fast') {
                         console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                         fastNormalizationCount++;
+                    } else if (normalizedTender.normalized_method === 'rule-based-fallback') {
+                        console.log(`Using fallback normalization for ${tableName}`);
+                        fallbackCount++;
                     } else {
                         console.log(`LLM normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
                     }
