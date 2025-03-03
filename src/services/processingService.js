@@ -35,8 +35,10 @@ function extractNumericValue(value) {
             .replace(/[A-Z]{3}\s*/g, '')
             // Remove currency symbols
             .replace(/[$€£¥]/g, '')
-            // Remove commas and spaces
+            // Remove commas, spaces, and other separators
             .replace(/[,\s]/g, '')
+            // Remove any trailing currency codes that might remain
+            .replace(/\s*[A-Z]{3}$/g, '')
             // Trim whitespace
             .trim();
             
@@ -105,51 +107,40 @@ async function processTendersFromAllSources(supabaseAdmin, options = {}) {
         };
     }
     
-    // Process sources in smaller batches to ensure fair distribution
-    const batchSize = Math.min(5, Math.ceil(tendersPerSource / 4)); // Process 1/4 of tendersPerSource at a time
-    let remainingTenders = tendersPerSource;
-    
-    while (remainingTenders > 0) {
-        const currentBatchSize = Math.min(batchSize, remainingTenders);
-        console.log(`\nProcessing batch of ${currentBatchSize} tenders from each source (${remainingTenders} remaining per source)`);
+    // Process each source in sequence
+    for (const sourceTable of sources) {
+        console.log(`\nProcessing ${sourceTable}...`);
         
-        // Process each source
-        for (const sourceTable of sources) {
-            console.log(`\nProcessing ${sourceTable}...`);
-            
-            const result = await processTendersFromTable(supabaseAdmin, sourceTable, currentBatchSize);
-            
-            // Aggregate results
-            totalResults.processed += result.processed;
-            totalResults.skipped += result.skipped;
-            totalResults.updated += result.updated || 0;
-            totalResults.errors += result.errors;
-            totalResults.fallback += result.fallback || 0;
-            totalResults.fastNormalization += result.fastNormalization || 0;
-            
-            // Update source-specific results
-            totalResults.bySource[sourceTable].processed += result.processed;
-            totalResults.bySource[sourceTable].skipped += result.skipped;
-            totalResults.bySource[sourceTable].updated += result.updated || 0;
-            totalResults.bySource[sourceTable].errors += result.errors;
-            totalResults.bySource[sourceTable].fallback += result.fallback || 0;
-            totalResults.bySource[sourceTable].fastNormalization += result.fastNormalization || 0;
-            
-            console.log(`Completed batch from ${sourceTable}:`);
-            console.log(`- Processed: ${result.processed}`);
-            console.log(`- Skipped: ${result.skipped}`);
-            console.log(`- Updated: ${result.updated || 0}`);
-            console.log(`- Errors: ${result.errors}`);
-            console.log(`- Normalization: ${result.fastNormalization || 0} fast, ${result.fallback || 0} fallbacks`);
-            
-            // If in continuous mode and we've processed enough from this source, move to next
-            if (continuous && result.processed + result.skipped === 0) {
-                console.log(`No more tenders to process from ${sourceTable}, moving to next source`);
-                continue;
-            }
+        const result = await processTendersFromTable(supabaseAdmin, sourceTable, tendersPerSource);
+        
+        // Aggregate results
+        totalResults.processed += result.processed;
+        totalResults.skipped += result.skipped;
+        totalResults.updated += result.updated || 0;
+        totalResults.errors += result.errors;
+        totalResults.fallback += result.fallback || 0;
+        totalResults.fastNormalization += result.fastNormalization || 0;
+        
+        // Update source-specific results
+        totalResults.bySource[sourceTable].processed += result.processed;
+        totalResults.bySource[sourceTable].skipped += result.skipped;
+        totalResults.bySource[sourceTable].updated += result.updated || 0;
+        totalResults.bySource[sourceTable].errors += result.errors;
+        totalResults.bySource[sourceTable].fallback += result.fallback || 0;
+        totalResults.bySource[sourceTable].fastNormalization += result.fastNormalization || 0;
+        
+        console.log(`Completed processing ${sourceTable}:`);
+        console.log(`- Processed: ${result.processed}`);
+        console.log(`- Skipped: ${result.skipped}`);
+        console.log(`- Updated: ${result.updated || 0}`);
+        console.log(`- Errors: ${result.errors}`);
+        console.log(`- Normalization: ${result.fastNormalization || 0} fast, ${result.fallback || 0} fallbacks`);
+        
+        // If in continuous mode and we've processed enough from this source, continue to next
+        if (continuous && result.processed + result.skipped === 0) {
+            console.log(`No more tenders to process from ${sourceTable}, moving to next source`);
+            continue;
         }
-        
-        remainingTenders -= currentBatchSize;
     }
     
     // Log overall results
@@ -195,13 +186,13 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     }
     
     // Reset counters for this batch
-    let processedCount = 0; // Successfully normalized tenders
+    let processedCount = 0;
     let skippedCount = 0;
     let errorCount = 0;
-    let fallbackCount = 0; // Track number of fallback normalizations
-    let fastNormalizationCount = 0; // Track number of fast normalizations
-    let updatedCount = 0; // Track number of updated records
-    let attemptCount = 0; // Track total attempts
+    let fallbackCount = 0;
+    let fastNormalizationCount = 0;
+    let updatedCount = 0;
+    let attemptCount = 0;
     
     // Check if table has timestamp fields for incremental processing
     const tableInfo = await supabaseAdmin
@@ -215,106 +206,86 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
     console.log(`Found timestamp fields for table ${tableName}:`, timestampFields);
     
     // Define a chunk size for batch processing
-    const chunkSize = 20;
-    const concurrency = 5;
+    const chunkSize = 50; // Increased for better efficiency
+    const concurrency = 10; // Increased for faster processing
     
-    // Process in chunks to avoid overwhelming the system
-    const processChunk = async (offset) => {
-        console.log(`Processing chunk from ${offset} to ${Math.min(offset + chunkSize, limit)} of ${limit} target normalizations`);
+    // Get all unprocessed tenders first
+    let queryBatch = supabaseAdmin.from(tableName)
+        .select('*');
         
-        // Get a batch of tenders that haven't been processed yet
-        let queryBatch = supabaseAdmin.from(tableName)
-            .select('*');
-            
-        // Always sort by created_at desc first to prioritize newer tenders
-        if (timestampFields.includes('created_at')) {
-            queryBatch = queryBatch.order('created_at', { ascending: false });
-        } else if (timestampFields.includes('updated_at')) {
-            // Fallback to updated_at if created_at is not available
-            queryBatch = queryBatch.order('updated_at', { ascending: false });
+    // Always sort by created_at desc first to prioritize newer tenders
+    if (timestampFields.includes('created_at')) {
+        queryBatch = queryBatch.order('created_at', { ascending: false });
+    } else if (timestampFields.includes('updated_at')) {
+        queryBatch = queryBatch.order('updated_at', { ascending: false });
+    }
+    
+    // Filter for unprocessed tenders
+    if (timestampFields.includes('last_processed_at') && !forceReprocess) {
+        queryBatch = queryBatch.is('last_processed_at', null);
+    }
+    
+    // Get all potential tenders first
+    const { data: allTenders, error: fetchError } = await queryBatch;
+    
+    if (fetchError) {
+        console.error(`Error fetching tenders from ${tableName}:`, fetchError);
+        return { success: false, error: fetchError.message };
+    }
+    
+    if (!allTenders || allTenders.length === 0) {
+        console.log(`No unprocessed tenders found in ${tableName}`);
+        return { success: true, processed: 0, skipped: 0, errors: 0, fallback: 0 };
+    }
+    
+    // Log the date range of tenders being processed
+    if (allTenders.length > 0) {
+        const dateField = timestampFields.includes('created_at') ? 'created_at' : 'updated_at';
+        if (timestampFields.includes(dateField)) {
+            const newestDate = new Date(allTenders[0][dateField]).toISOString();
+            const oldestDate = new Date(allTenders[allTenders.length - 1][dateField]).toISOString();
+            console.log(`Found ${allTenders.length} unprocessed tenders ${dateField} between:`);
+            console.log(`  Newest: ${newestDate}`);
+            console.log(`  Oldest: ${oldestDate}`);
         }
+    }
+    
+    // Pre-check which tenders already exist
+    const sourceIds = allTenders.map(tender => adapter.getSourceId(tender)).filter(id => id);
+    const { data: existingTenders } = await supabaseAdmin
+        .from('unified_tenders')
+        .select('source_id')
+        .eq('source_table', tableName)
+        .in('source_id', sourceIds);
+    
+    const existingSourceIds = new Set(existingTenders?.map(t => t.source_id) || []);
+    
+    // Filter out existing tenders before processing
+    const tendersToProcess = allTenders.filter(tender => {
+        const sourceId = adapter.getSourceId(tender);
+        return forceReprocess || !existingSourceIds.has(sourceId);
+    });
+    
+    console.log(`Found ${tendersToProcess.length} new tenders to process`);
+    
+    // Process tenders in chunks with controlled concurrency
+    for (let i = 0; i < tendersToProcess.length && processedCount < limit; i += chunkSize) {
+        const chunk = tendersToProcess.slice(i, i + chunkSize);
+        console.log(`Processing chunk ${Math.floor(i/chunkSize) + 1} with ${chunk.length} tenders`);
         
-        // Then filter for unprocessed tenders
-        if (timestampFields.includes('last_processed_at')) {
-            queryBatch = queryBatch.is('last_processed_at', null);
-        }
-        
-        // Finally add pagination
-        queryBatch = queryBatch.range(offset, offset + chunkSize - 1);
-        
-        const { data: tenders, error: fetchError } = await queryBatch;
-        
-        if (fetchError) {
-            console.error(`Error fetching tenders from ${tableName}:`, fetchError);
-            return { success: false, error: fetchError.message };
-        }
-        
-        if (!tenders || tenders.length === 0) {
-            console.log(`No more unprocessed tenders found from ${offset}`);
-            return { success: true, processed: 0, skipped: 0, errors: 0, fallback: 0 };
-        }
-        
-        // Log the date range of tenders being processed
-        if (tenders.length > 0) {
-            const dateField = timestampFields.includes('created_at') ? 'created_at' : 'updated_at';
-            if (timestampFields.includes(dateField)) {
-                const newestDate = new Date(tenders[0][dateField]).toISOString();
-                const oldestDate = new Date(tenders[tenders.length - 1][dateField]).toISOString();
-                console.log(`Processing batch of ${tenders.length} tenders ${dateField} between:`);
-                console.log(`  Newest: ${newestDate}`);
-                console.log(`  Oldest: ${oldestDate}`);
-            }
-        }
-        
-        // Pre-check which tenders already exist to avoid processing them
-        const sourceIds = tenders.map(tender => adapter.getSourceId(tender)).filter(id => id);
-        const { data: existingTenders } = await supabaseAdmin
-            .from('unified_tenders')
-            .select('source_id')
-            .eq('source_table', tableName)
-            .in('source_id', sourceIds);
-        
-        const existingSourceIds = new Set(existingTenders?.map(t => t.source_id) || []);
-        
-        // Process tenders with controlled concurrency
         const results = await Promise.all(
-            tenders.map(async (tender, index) => {
-                // Simple concurrency control - wait before processing based on index
-                await new Promise(resolve => setTimeout(resolve, Math.floor(index / concurrency) * 500));
+            chunk.map(async (tender, index) => {
+                // Simple concurrency control
+                await new Promise(resolve => setTimeout(resolve, Math.floor(index / concurrency) * 100));
                 
                 try {
                     attemptCount++;
-                    
-                    // Get source ID using the adapter
-                    let sourceId = adapter.getSourceId(tender);
-                    
-                    if (!sourceId) {
-                        console.warn('Could not determine a source ID for tender, using record index');
-                        sourceId = `${tableName}_${offset + index}`;
-                    }
-                    
-                    // Skip if tender already exists and we're not force reprocessing
-                    if (!forceReprocess && existingSourceIds.has(sourceId)) {
-                        console.log(`Tender ${sourceId} from ${tableName} already exists, skipping`);
-                        
-                        // Update the last_processed_at timestamp even for skipped records
-                        if (timestampFields.includes('last_processed_at')) {
-                            await supabaseAdmin
-                                .from(tableName)
-                                .update({ last_processed_at: new Date().toISOString() })
-                                .eq('id', tender.id);
-                        }
-                        
-                        skippedCount++;
-                        return { success: true, skipped: true };
-                    }
+                    const sourceId = adapter.getSourceId(tender) || `${tableName}_${i + index}`;
                     
                     // Log the tender's creation date if available
                     if (tender.created_at) {
                         console.log(`Processing tender ${sourceId} created at ${new Date(tender.created_at).toISOString()}`);
                     }
-                    
-                    console.log(`Processing tender ${offset + index + 1} from ${tableName} (Attempt ${attemptCount}, Successful: ${processedCount}/${limit})`);
                     
                     // Use the adapter to process the tender
                     const startTime = Date.now();
@@ -326,48 +297,43 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Log normalization method
                     if (normalizedTender.normalized_method === 'rule-based-fallback') {
-                        console.log(`Tender ${offset + index + 1} from ${tableName} normalized using rule-based fallback`);
+                        console.log(`Tender ${sourceId} normalized using rule-based fallback`);
                         fallbackCount++;
                     } else if (normalizedTender.normalized_method === 'rule-based-fast') {
-                        console.log(`Tender ${offset + index + 1} from ${tableName} normalized using fast method`);
+                        console.log(`Tender ${sourceId} normalized using fast method`);
                         fastNormalizationCount++;
                     }
                     
-                    // Check if an error occurred during normalization
                     if (normalizedTender.status === 'error') {
                         console.error(`Error normalizing tender: ${normalizedTender.description}`);
                         errorCount++;
                         return { success: false, error: normalizedTender.description };
                     }
                     
-                    // CRITICAL FIX: Set url, tender_type, and other fields to null if they are empty strings
-                    // Also handle currency fields
+                    // Clean up fields
                     Object.keys(normalizedTender).forEach(key => {
                         const value = normalizedTender[key];
-                        
-                        // Handle empty strings
                         if (value === '') {
                             normalizedTender[key] = null;
-                            return;
-                        }
-                        
-                        // Handle currency/numeric fields
-                        if (key === 'estimated_value' || key === 'contract_value' || key.includes('amount') || key.includes('value')) {
-                            const numericValue = extractNumericValue(value);
-                            if (numericValue !== null) {
-                                normalizedTender[key] = numericValue;
-                            } else {
-                                console.warn(`Could not extract numeric value from ${key}: ${value}, setting to null`);
+                        } else if (key === 'estimated_value' || key === 'contract_value' || key.includes('amount') || key.includes('value')) {
+                            try {
+                                const numericValue = extractNumericValue(value);
+                                if (numericValue === null) {
+                                    console.warn(`Could not extract numeric value for ${key} from: ${value}, setting to null`);
+                                    normalizedTender[key] = null;
+                                } else {
+                                    normalizedTender[key] = numericValue;
+                                }
+                            } catch (error) {
+                                console.warn(`Error processing numeric value for ${key}: ${error.message}`);
                                 normalizedTender[key] = null;
                             }
                         }
                     });
                     
-                    // CRITICAL FIX: Make sure source_table and source_id are set
                     normalizedTender.source_table = tableName;
                     normalizedTender.source_id = sourceId;
                     
-                    // Insert the normalized tender in the database
                     try {
                         const { error: insertError } = await supabaseAdmin
                             .from('unified_tenders')
@@ -378,9 +344,9 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                             errorCount++;
                             return { success: false, error: insertError.message };
                         }
+                        
                         processedCount++;
                         
-                        // Update the last_processed_at timestamp
                         if (timestampFields.includes('last_processed_at')) {
                             await supabaseAdmin
                                 .from(tableName)
@@ -388,7 +354,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                                 .eq('id', tender.id);
                         }
                         
-                        console.log(`Successfully processed tender ${sourceId} from ${tableName}`);
+                        console.log(`Successfully processed tender ${sourceId}`);
                         return { success: true };
                     } catch (error) {
                         console.error(`Error saving tender: ${error.message}`);
@@ -396,62 +362,17 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                         return { success: false, error: error.message };
                     }
                 } catch (error) {
-                    console.error(`Error processing tender from ${tableName}:`, error);
+                    console.error(`Error processing tender:`, error);
                     errorCount++;
                     return { success: false, error: error.message };
                 }
             })
         );
         
-        return {
-            success: true,
-            processed: results.filter(r => r.success && !r.skipped).length,
-            skipped: results.filter(r => r.success && r.skipped).length,
-            errors: results.filter(r => !r.success).length,
-            fallback: fallbackCount,
-            fastNormalization: fastNormalizationCount
-        };
-    };
-    
-    // Process tenders in chunks until we reach the limit of successful normalizations
-    let offset = 0;
-    let moreToProcess = true;
-    
-    while (moreToProcess && processedCount < limit) {
-        const chunkResult = await processChunk(offset);
-        if (!chunkResult.success) {
-            console.error(`Error processing chunk at offset ${offset}:`, chunkResult.error);
-            return { 
-                success: false, 
-                error: chunkResult.error,
-                processed: processedCount,
-                skipped: skippedCount,
-                errors: errorCount,
-                fallback: fallbackCount,
-                fastNormalization: fastNormalizationCount,
-                attempts: attemptCount
-            };
+        // If we've reached the limit or processed all tenders, break
+        if (processedCount >= limit || i + chunkSize >= tendersToProcess.length) {
+            break;
         }
-        
-        // Update counters
-        processedCount += chunkResult.processed;
-        skippedCount += chunkResult.skipped;
-        errorCount += chunkResult.errors;
-        fallbackCount += chunkResult.fallback || 0;
-        fastNormalizationCount += chunkResult.fastNormalization || 0;
-        
-        // If we processed fewer items than the chunk size, we're done
-        if (chunkResult.processed + chunkResult.skipped + chunkResult.errors < chunkSize) {
-            moreToProcess = false;
-        }
-        
-        // If we've skipped too many records without finding new ones to process, stop
-        if (skippedCount > limit * 2) {
-            console.log(`Skipped ${skippedCount} tenders while only finding ${processedCount} new ones. Stopping to avoid excessive processing.`);
-            moreToProcess = false;
-        }
-        
-        offset += chunkSize;
     }
     
     console.log(`Completed processing batch from ${tableName}:`);

@@ -32,7 +32,9 @@ class SamGovAdapter extends BaseSourceAdapter {
       country: "UNITED STATES", // Default for SAM.gov
       status: this.mapStatus(tender.opportunity_status),
       tender_type: this.mapOpportunityType(tender.opportunity_type),
-      sector: this.inferSectorFromNAICS(tender.naics_code)
+      sector: this.inferSectorFromNAICS(tender.naics_code),
+      estimated_value: this.extractNumericValue(tender.estimated_value || tender.potential_award_amount || tender.award_amount),
+      contract_value: this.extractNumericValue(tender.contract_value || tender.award_amount || tender.potential_award_amount)
     };
   }
   

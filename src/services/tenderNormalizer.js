@@ -464,6 +464,41 @@ function fallbackNormalizeTender(tenderData, sourceTable) {
             else if (naicsFirstTwo === '22') normalizedData.sector = "Utilities";
             else if (naicsFirstTwo === '11') normalizedData.sector = "Agriculture";
         }
+
+        // Extract currency values
+        try {
+            // Helper function to extract numeric values
+            function extractNumericValue(value) {
+                if (value === null || value === undefined) return null;
+                try {
+                    if (typeof value === 'number') return value;
+                    let cleanValue = value.toString()
+                        .replace(/[A-Z]{3}\s*/g, '')
+                        .replace(/[$€£¥]/g, '')
+                        .replace(/,/g, '')
+                        .trim();
+                    const numericValue = parseFloat(cleanValue);
+                    return isNaN(numericValue) ? null : numericValue;
+                } catch (error) {
+                    console.warn(`Failed to extract numeric value from: ${value}`);
+                    return null;
+                }
+            }
+
+            normalizedData.estimated_value = extractNumericValue(
+                tenderData.estimated_value || 
+                tenderData.potential_award_amount || 
+                tenderData.award_amount
+            );
+            
+            normalizedData.contract_value = extractNumericValue(
+                tenderData.contract_value || 
+                tenderData.award_amount || 
+                tenderData.potential_award_amount
+            );
+        } catch (e) {
+            console.warn(`Failed to process currency values: ${e.message}`);
+        }
     }
     else if (sourceTable === 'ted') {
         // TED (Tenders Electronic Daily) specific fields
