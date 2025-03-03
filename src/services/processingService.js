@@ -609,7 +609,5 @@ function logPerformanceStats() {
 
 module.exports = {
     processTendersFromTable,
-    processTendersFromAllSources,
-    runContinuousProcessing,
-    getAllSourceTables
+    processTendersFromAllSources
 };
