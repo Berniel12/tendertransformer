@@ -339,11 +339,14 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Use fast normalization for English tenders or minimal content
                     let shouldUseFastNormalization = false;
-                    if (normalizationNeeds.language === 'en' && !normalizationNeeds.complexFields) {
-                        console.log(`Using fast normalization for tender: English tender with some missing fields can use direct parsing`);
+                    if (tableName === 'sam_gov') {
+                        console.log(`Using fast normalization for tender: SAM.gov tenders use dedicated handler`);
+                        shouldUseFastNormalization = true;
+                    } else if (normalizationNeeds.language === 'en' && !normalizationNeeds.complexFields) {
+                        console.log(`Using fast normalization for tender: English tender with simple fields`);
                         shouldUseFastNormalization = true;
                     } else if (normalizationNeeds.minimalContent) {
-                        console.log(`Using fast normalization for tender: Tender content is minimal, using direct parsing`);
+                        console.log(`Using fast normalization for tender: Tender content is minimal`);
                         shouldUseFastNormalization = true;
                     } else if (!normalizationNeeds.needsTranslation && !normalizationNeeds.complexFields) {
                         console.log(`Using fast normalization for tender: Simple tender with no translation needed`);
@@ -360,7 +363,7 @@ async function processTendersFromTable(supabaseAdmin, tableName, limit = 100, fo
                     
                     // Log normalization method
                     if (normalizedTender.normalized_method === 'rule-based-fallback') {
-                        console.log(`Tender ${sourceId} normalized using rule-based fallback`);
+                        console.log(`Using fallback normalization for ${tableName} due to LLM unavailability`);
                         fallbackCount++;
                     } else if (normalizedTender.normalized_method === 'rule-based-fast') {
                         console.log(`Fast normalization completed in ${(processingTime / 1000).toFixed(3)} seconds`);
