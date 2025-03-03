@@ -1003,8 +1003,210 @@ function promiseWithTimeout(promise, timeoutMs, errorMessage) {
     });
 }
 
+/**
+ * Process all unprocessed tenders from all sources using pagination
+ * This function will process every tender in the database that hasn't been processed yet
+ * @param {Object} supabaseAdmin - Supabase admin client
+ * @returns {Promise<Object>} Processing results
+ */
+async function processAllUnprocessedTenders(supabaseAdmin) {
+    console.log('Starting to process ALL unprocessed tenders from all sources');
+    
+    // Get all available source adapters
+    const sources = sourceRegistry.getRegisteredSources();
+    if (!sources || sources.length === 0) {
+        console.error('No source adapters available');
+        return { 
+            success: false, 
+            error: 'No source adapters registered' 
+        };
+    }
+    
+    console.log(`Found ${sources.length} sources: ${sources.join(', ')}`);
+    
+    // Define processing parameters
+    const totalResults = {
+        success: true,
+        processed: 0,
+        skipped: 0,
+        updated: 0,
+        errors: 0,
+        fallback: 0,
+        fastNormalization: 0,
+        bySource: {}
+    };
+    
+    // Process each source sequentially with pagination
+    for (const sourceTable of sources) {
+        console.log(`\n=== Processing ALL tenders from source: ${sourceTable} ===\n`);
+        
+        // Initialize source results
+        totalResults.bySource[sourceTable] = {
+            processed: 0,
+            skipped: 0,
+            updated: 0,
+            errors: 0,
+            fallback: 0,
+            fastNormalization: 0
+        };
+        
+        try {
+            // Check if table has timestamp fields for incremental processing
+            const tableInfo = await supabaseAdmin
+                .from('information_schema.columns')
+                .select('column_name')
+                .eq('table_name', sourceTable)
+                .in('column_name', ['created_at', 'updated_at', 'last_processed_at']);
+            
+            const hasTimestampFields = tableInfo.data && tableInfo.data.length > 0;
+            const timestampFields = hasTimestampFields ? tableInfo.data.map(col => col.column_name) : [];
+            console.log(`Found timestamp fields for table ${sourceTable}:`, timestampFields);
+            
+            // Pagination settings
+            const pageSize = 1000; // Supabase default page size
+            let processedCount = 0;
+            let moreToProcess = true;
+            let page = 0;
+            
+            // Get adapter for this source
+            const adapter = sourceRegistry.getAdapter(sourceTable);
+            if (!adapter) {
+                console.error(`No adapter available for ${sourceTable}`);
+                totalResults.errors++;
+                continue;
+            }
+            
+            // Process all tenders in pages
+            while (moreToProcess) {
+                console.log(`Processing page ${page + 1} (tenders ${page * pageSize} to ${(page + 1) * pageSize - 1}) from ${sourceTable}`);
+                
+                // Build query for this page
+                let queryBatch = supabaseAdmin.from(sourceTable)
+                    .select('*')
+                    .range(page * pageSize, (page + 1) * pageSize - 1);
+                
+                // Always sort by created_at desc first to prioritize newer tenders
+                if (timestampFields.includes('created_at')) {
+                    queryBatch = queryBatch.order('created_at', { ascending: false });
+                } else if (timestampFields.includes('updated_at')) {
+                    queryBatch = queryBatch.order('updated_at', { ascending: false });
+                }
+                
+                // Filter for unprocessed tenders only
+                if (timestampFields.includes('last_processed_at')) {
+                    queryBatch = queryBatch.is('last_processed_at', null);
+                }
+                
+                // Get tenders for this page
+                const { data: pageTenders, error: fetchError } = await queryBatch;
+                
+                if (fetchError) {
+                    console.error(`Error fetching tenders from ${sourceTable}:`, fetchError);
+                    totalResults.errors++;
+                    break;
+                }
+                
+                if (!pageTenders || pageTenders.length === 0) {
+                    console.log(`No more unprocessed tenders found in ${sourceTable}`);
+                    moreToProcess = false;
+                    break;
+                }
+                
+                console.log(`Found ${pageTenders.length} unprocessed tenders in page ${page + 1} from ${sourceTable}`);
+                
+                // Pre-check which tenders already exist
+                const sourceIds = pageTenders.map(tender => adapter.getSourceId(tender)).filter(id => id);
+                const { data: existingTenders } = await supabaseAdmin
+                    .from('unified_tenders')
+                    .select('source_id, updated_at')
+                    .eq('source_table', sourceTable)
+                    .in('source_id', sourceIds);
+                
+                const existingTenderMap = new Map(existingTenders?.map(t => [t.source_id, t]) || []);
+                
+                // Process all tenders in this page
+                const pageResults = await processTendersFromTable(
+                    supabaseAdmin, 
+                    sourceTable, 
+                    -1, // No limit, process all
+                    false, // Don't force reprocess
+                    pageTenders // Use pre-filtered tenders
+                );
+                
+                // Update counters
+                if (pageResults.success) {
+                    totalResults.bySource[sourceTable].processed += pageResults.processed || 0;
+                    totalResults.bySource[sourceTable].skipped += pageResults.skipped || 0;
+                    totalResults.bySource[sourceTable].updated += pageResults.updated || 0;
+                    totalResults.bySource[sourceTable].errors += pageResults.errors || 0;
+                    totalResults.bySource[sourceTable].fallback += pageResults.fallback || 0;
+                    totalResults.bySource[sourceTable].fastNormalization += pageResults.fastNormalization || 0;
+                    
+                    totalResults.processed += pageResults.processed || 0;
+                    totalResults.skipped += pageResults.skipped || 0;
+                    totalResults.updated += pageResults.updated || 0;
+                    totalResults.errors += pageResults.errors || 0;
+                    totalResults.fallback += pageResults.fallback || 0;
+                    totalResults.fastNormalization += pageResults.fastNormalization || 0;
+                    
+                    // Check if we processed anything in this page
+                    if (pageResults.processed === 0 && pageResults.updated === 0) {
+                        // If all tenders were skipped or errored, move to next page
+                        console.log(`No tenders were processed in this page, moving to next page`);
+                    }
+                    
+                    // Continue to next page if we got a full page of results
+                    if (pageTenders.length === pageSize) {
+                        page++;
+                    } else {
+                        moreToProcess = false;
+                    }
+                } else {
+                    console.error(`Error processing tenders from ${sourceTable}:`, pageResults.error);
+                    totalResults.errors++;
+                    moreToProcess = false;
+                }
+                
+                // Log progress after each page
+                console.log(`\n=== Progress for ${sourceTable} ===`);
+                console.log(`- Processed: ${totalResults.bySource[sourceTable].processed} tenders`);
+                console.log(`- Updated: ${totalResults.bySource[sourceTable].updated} tenders`);
+                console.log(`- Skipped: ${totalResults.bySource[sourceTable].skipped} tenders`);
+                console.log(`- Errors: ${totalResults.bySource[sourceTable].errors} tenders`);
+                console.log(`- Fallback normalizations: ${totalResults.bySource[sourceTable].fallback} tenders`);
+                console.log(`- Fast normalizations: ${totalResults.bySource[sourceTable].fastNormalization} tenders\n`);
+            }
+            
+            console.log(`\n=== Completed processing ALL tenders from source: ${sourceTable} ===`);
+            console.log(`- Total processed: ${totalResults.bySource[sourceTable].processed} tenders`);
+            console.log(`- Total updated: ${totalResults.bySource[sourceTable].updated} tenders`);
+            console.log(`- Total skipped: ${totalResults.bySource[sourceTable].skipped} tenders`);
+            console.log(`- Total errors: ${totalResults.bySource[sourceTable].errors} tenders\n`);
+            
+        } catch (error) {
+            console.error(`Error processing source ${sourceTable}:`, error);
+            totalResults.errors++;
+            totalResults.success = false;
+        }
+    }
+    
+    // Log overall results
+    console.log('\n=== FINAL Processing Summary ===');
+    console.log(`Total tenders processed: ${totalResults.processed}`);
+    console.log(`Total tenders updated: ${totalResults.updated}`);
+    console.log(`Total tenders skipped: ${totalResults.skipped}`);
+    console.log(`Total errors encountered: ${totalResults.errors}`);
+    console.log(`Total fallback normalizations: ${totalResults.fallback}`);
+    console.log(`Total fast normalizations: ${totalResults.fastNormalization}`);
+    
+    return totalResults;
+}
+
 module.exports = {
     processTendersFromTable,
     processTendersFromAllSources,
-    processNewestTendersFromAllSources
+    processNewestTendersFromAllSources,
+    processAllUnprocessedTenders,
+    runContinuousProcessing: processNewestTendersFromAllSources, // Alias for backward compatibility 
+    promiseWithTimeout
 };

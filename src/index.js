@@ -9,7 +9,12 @@ require('dotenv').config();
 // Import required libraries and services
 const { createClient } = require('@supabase/supabase-js');
 const sourceRegistry = require('./services/sourceRegistry');
-const { processTendersFromTable, processTendersFromAllSources, runContinuousProcessing } = require('./services/processingService');
+const {
+    processTendersFromTable,
+    processTendersFromAllSources,
+    processNewestTendersFromAllSources,
+    processAllUnprocessedTenders
+} = require('./services/processingService');
 
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -139,13 +144,36 @@ async function runContinuousProcessingWrapper() {
         // Use the enhanced continuous processing from the processing service
         const options = {
             tendersPerSource: parseInt(process.env.TENDERS_PER_SOURCE || '1000', 10),
-            waitMinutes: parseInt(process.env.PROCESSING_INTERVAL_MINUTES || '5', 10)
+            waitMinutes: parseInt(process.env.PROCESSING_INTERVAL_MINUTES || '5', 10),
+            continuous: true
         };
         
-        await runContinuousProcessing(supabaseAdmin, options);
+        await processNewestTendersFromAllSources(supabaseAdmin, options);
     } catch (error) {
         console.error('Error in continuous processing:', error);
         throw error;
+    }
+}
+
+/**
+ * Process all unprocessed tenders from all sources with pagination
+ * @returns {Promise<void>}
+ */
+async function processAllUnprocessed() {
+    console.log('Processing ALL unprocessed tenders from all sources using pagination');
+    
+    try {
+        const results = await processAllUnprocessedTenders(supabaseAdmin);
+        
+        console.log('\n=== Final Processing Summary ===');
+        console.log(`Total tenders processed: ${results.processed}`);
+        console.log(`Total tenders skipped: ${results.skipped}`);
+        console.log(`Total tenders updated: ${results.updated}`);
+        console.log(`Total errors encountered: ${results.errors}`);
+        console.log(`Total fallback normalizations: ${results.fallback}`);
+        console.log(`Total fast normalizations: ${results.fastNormalization}`);
+    } catch (error) {
+        console.error(`Error processing all unprocessed tenders:`, error);
     }
 }
 
@@ -173,40 +201,43 @@ async function main() {
         } else if (command === 'process-round-robin') {
             // Process tenders from all sources in round-robin fashion
             await processAllSourcesRoundRobin();
+        } else if (command === 'process-all-unprocessed') {
+            // Process ALL unprocessed tenders from all sources using pagination
+            await processAllUnprocessed();
         } else if (command === 'help' || command === '--help' || command === '-h') {
             // Show usage instructions
             showUsage();
         } else {
             // Default behavior: run continuous processing
-            if (command !== 'continuous') {
-                console.log('No specific command provided or command not recognized.');
-                console.log('Defaulting to continuous processing mode.');
-                console.log('(Use "node src/index.js help" to see all available commands)');
-                console.log('');
-            }
             await runContinuousProcessingWrapper();
         }
     } catch (error) {
-        console.error('Unhandled error:', error);
+        console.error('Error running tender processing application:', error);
         process.exit(1);
     }
 }
 
 /**
- * Show usage instructions
+ * Display usage instructions
  */
 function showUsage() {
-    console.log('Usage:');
-    console.log('  node src/index.js                     - Run continuous processing (default)');
-    console.log('  node src/index.js continuous          - Run continuous processing');
-    console.log('  node src/index.js process <source>    - Process tenders from a specific source');
-    console.log('  node src/index.js process-all         - Process tenders from all sources sequentially');
-    console.log('  node src/index.js process-round-robin - Process tenders from all sources in round-robin fashion');
-    console.log('  node src/index.js help                - Show this help message');
-    console.log('');
-    console.log('Environment Variables:');
-    console.log('  TENDERS_PER_SOURCE           - Number of tenders to process from each source per round (default: 1000)');
-    console.log('  PROCESSING_INTERVAL_MINUTES  - Minutes to wait between processing rounds (default: 5)');
+    console.log('Usage: node src/index.js [command] [source]');
+    console.log('\nCommands:');
+    console.log('  process <source>            - Process tenders from a specific source');
+    console.log('  process-all                 - Process tenders from all sources sequentially');
+    console.log('  process-round-robin         - Process tenders from all sources in round-robin fashion');
+    console.log('  process-all-unprocessed     - Process ALL unprocessed tenders from all sources (uses pagination)');
+    console.log('  help                        - Show this help message');
+    console.log('\nSources:');
+    console.log('  ' + sourceRegistry.getRegisteredSources().join(', '));
+    console.log('\nEnvironment Variables:');
+    console.log('  SUPABASE_URL                - Supabase project URL');
+    console.log('  SUPABASE_SERVICE_KEY        - Supabase service role key');
+    console.log('  OPENAI_API_KEY              - OpenAI API key');
+    console.log('  TENDERS_PER_SOURCE          - Number of tenders to process from each source per round (default: 1000)');
+    console.log('  PROCESSING_INTERVAL_MINUTES - Minutes to wait between processing rounds (default: 5)');
+    
+    process.exit(0);
 }
 
 // Run the application if this file is executed directly
