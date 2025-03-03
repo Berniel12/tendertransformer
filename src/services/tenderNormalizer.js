@@ -1161,6 +1161,112 @@ function fillMissingFields(normalizedData) {
 }
 
 /**
+ * Extract tender type from tender data
+ * @param {Object} tenderData - Raw tender data from source
+ * @param {string} sourceTable - Name of the source table
+ * @returns {string|null} Extracted tender type or null if not found
+ */
+function extractTenderType(tenderData, sourceTable) {
+    // Check direct mappings first
+    if (tenderData.tender_type) return tenderData.tender_type;
+    if (tenderData.procurement_type) return tenderData.procurement_type;
+    if (tenderData.procurement_method) return tenderData.procurement_method;
+    if (tenderData.opportunity_type) return tenderData.opportunity_type;
+    if (tenderData.notice_type) return tenderData.notice_type;
+    
+    // Source-specific handling
+    switch (sourceTable) {
+        case 'sam_gov':
+            if (tenderData.original_data && tenderData.original_data.opportunity_type) {
+                return tenderData.original_data.opportunity_type;
+            }
+            // Default SAM.gov type
+            return "Contract Opportunity";
+            
+        case 'world_bank':
+            if (tenderData.selection_method) return tenderData.selection_method;
+            if (tenderData.procurement_method) return tenderData.procurement_method;
+            return "Procurement Notice";
+            
+        case 'adb':
+            return "Procurement Notice";
+            
+        default:
+            // Try to infer from title and description
+            const title = tenderData.title || '';
+            const description = tenderData.description || '';
+            const text = (title + ' ' + description).toLowerCase();
+            
+            if (text.includes('award') || text.includes('awarded')) {
+                return "Contract Award";
+            } else if (text.includes('prior information') || text.includes('advance notice')) {
+                return "Prior Information Notice";
+            } else if (text.includes('request for proposal') || text.includes('rfp')) {
+                return "Request for Proposal";
+            } else if (text.includes('request for qualification') || text.includes('rfq')) {
+                return "Request for Qualification";
+            } else if (text.includes('invitation to bid') || text.includes('itb')) {
+                return "Invitation to Bid";
+            } else if (text.includes('expression of interest') || text.includes('eoi')) {
+                return "Expression of Interest";
+            }
+    }
+    
+    // Default value if nothing else matched
+    return "Tender";
+}
+
+/**
+ * Extract tender status from tender data
+ * @param {Object} tenderData - Raw tender data from source
+ * @param {string} sourceTable - Name of the source table
+ * @returns {string|null} Extracted tender status or null if not found
+ */
+function extractTenderStatus(tenderData, sourceTable) {
+    // Direct field mappings
+    if (tenderData.status) {
+        const status = tenderData.status.toLowerCase();
+        if (['active', 'open', 'ongoing', 'current'].includes(status)) {
+            return 'Open';
+        } else if (['closed', 'expired', 'completed', 'inactive', 'archived'].includes(status)) {
+            return 'Closed';
+        } else if (['awarded', 'contract awarded', 'winner selected'].includes(status)) {
+            return 'Awarded';
+        } else if (['canceled', 'cancelled', 'terminated'].includes(status)) {
+            return 'Canceled';
+        }
+        return tenderData.status; // Use original if not mapped
+    }
+    
+    // Infer from dates if available
+    if (tenderData.deadline_date) {
+        const now = new Date();
+        const deadline = new Date(tenderData.deadline_date);
+        return deadline > now ? 'Open' : 'Closed';
+    }
+    
+    // Source-specific logic
+    switch (sourceTable) {
+        case 'sam_gov':
+            if (tenderData.original_data && tenderData.original_data.status) {
+                const samStatus = tenderData.original_data.status.toLowerCase();
+                if (['active', 'published'].includes(samStatus)) {
+                    return 'Open';
+                } else if (['archived', 'inactive'].includes(samStatus)) {
+                    return 'Closed';
+                } else if (samStatus.includes('award')) {
+                    return 'Awarded';
+                }
+                return tenderData.original_data.status;
+            }
+            break;
+    }
+    
+    // No status determinable
+    return null;
+}
+
+/**
  * Rule-based tender normalization that works without LLM
  * This is used as a fallback when the LLM service is unavailable
  * 
